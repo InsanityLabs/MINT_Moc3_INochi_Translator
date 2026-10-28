@@ -6,6 +6,21 @@ __pycache__/
 # C extensions
 *.so
 
+#reaper files
+*.rpp
+*.rppz
+*.rppz2
+*.rppz3
+*.rppz4
+*.rppz5
+*.rppz6
+*.rppz7
+*.rppz8
+*.rppz9
+*.rppz10
+testdata/
+
+
 # Distribution / packaging
 .Python
 build/
