@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mint-core",
+    "crates/mint-cli",
+    "crates/mint-gui",
+]
+
+[workspace.dependencies]
+mint-core = { path = "crates/mint-core" }

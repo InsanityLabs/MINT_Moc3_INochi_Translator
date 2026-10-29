@@ -1,0 +1,10 @@
+[package]
+name = "mint-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mint-core = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+moc2cmo = { path = "../../vendor/moc2cmo" }

@@ -1,0 +1,12 @@
+[package]
+name = "mint-gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.31"
+mint-core = { path = "../mint-core" }
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+moc2cmo = { path = "../../vendor/moc2cmo" }
