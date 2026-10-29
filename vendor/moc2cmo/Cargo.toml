@@ -1,0 +1,22 @@
+[package]
+name = "moc2cmo"
+version = "1.1.20"
+edition = "2024"
+authors = ["Eatgrapes <Eatgrapesem232@qq.com>"]
+description = "A Rust library for decompiling Cubism .moc3 models into readable .cmo3 projects"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Eatgrapes/moc2cmo"
+keywords = ["live2d", "cubism", "moc3", "cmo3", "decompiler"]
+categories = ["parser-implementations", "multimedia"]
+
+[dependencies]
+byteorder = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+quick-xml = "0.38"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
