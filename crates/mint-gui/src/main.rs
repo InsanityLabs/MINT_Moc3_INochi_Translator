@@ -219,7 +219,21 @@ struct App {
     is_loading: bool,
     busy: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<String>>>,
+    about: bool,
 }
+
+const ABOUT_LIBS: &[(&str, &str)] = &[
+    ("moc2cmo (vendored, modified)", "MIT — Eatgrapes"),
+    ("egui / eframe", "MIT OR Apache-2.0 — Emil Ernerfeldt"),
+    ("image", "MIT OR Apache-2.0 — image-rs"),
+    ("zip", "MIT — zip-rs"),
+    ("rfd", "MIT — PolyMeilex"),
+    ("serde / serde_json", "MIT OR Apache-2.0 — serde-rs"),
+    ("byteorder", "Unlicense OR MIT — BurntSushi"),
+    ("flate2 + zlib-rs", "MIT OR Apache-2.0 — rust-lang / trifectatech"),
+    ("quick-xml", "MIT — tafia"),
+    ("thiserror", "MIT OR Apache-2.0 — dtolnay"),
+];
 
 impl Default for App {
     fn default() -> Self {
@@ -233,6 +247,7 @@ impl Default for App {
             is_loading: false,
             busy: Arc::new(AtomicBool::new(false)),
             log: Arc::new(Mutex::new(vec!["Open a .moc3 file (or drop one on the window).".into()])),
+            about: false,
         }
     }
 }
@@ -302,6 +317,10 @@ impl eframe::App for App {
                     if let Some(p) = rfd::FileDialog::new().add_filter("MOC3", &["moc3"]).pick_file() {
                         self.open(ctx, p);
                     }
+                }
+                ui.separator();
+                if ui.button("About").clicked() {
+                    self.about = true;
                 }
                 match &self.path {
                     Some(p) => ui.label(p.display().to_string()),
@@ -380,6 +399,25 @@ impl eframe::App for App {
                 }
             });
         });
+
+        if self.about {
+            let mut open = true;
+            egui::Window::new("About MINT").open(&mut open).resizable(false).show(ctx, |ui| {
+                ui.label(RichText::new("MINT — Moc3 INochi Translator").strong());
+                ui.label("Recovers editable projects (PSD, ORA, cmo3, Inochi2D) from compiled moc3 models.");
+                ui.label("Clean-room implementation — no Live2D code is used.");
+                ui.add_space(4.0);
+                ui.label("License: PolyForm Noncommercial 1.0.0 — noncommercial use only.");
+                ui.separator();
+                ui.label(RichText::new("Third-party components").strong());
+                for (name, lic) in ABOUT_LIBS {
+                    ui.label(format!("{name} — {lic}"));
+                }
+            });
+            if !open {
+                self.about = false;
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(tex) = &self.texture else {
