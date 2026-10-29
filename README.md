@@ -85,7 +85,7 @@ moc3 versions 1, 3, 3 and 6) and on custom models.
 - `crates/mint-core` — moc3 parser, pose evaluation, rasterizer, emitters
 - `crates/mint-cli` — command line tool
 - `crates/mint-gui` — egui app
-- `vendor/moc2cmo` — cmo3 archive/XML builder
+- `vendor/moc2cmo` — cmo3 archive/XML builder (MIT, by Eatgrapes; modified)
 
 ## License
 
