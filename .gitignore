@@ -19,6 +19,8 @@ __pycache__/
 *.rppz9
 *.rppz10
 testdata/
+backup/
+
 
 
 # Distribution / packaging
