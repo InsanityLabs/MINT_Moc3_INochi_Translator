@@ -148,86 +148,62 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
     }
     eprintln!("exported {} layers, skipped {} empty meshes", layer_of.iter().filter(|x| x.is_some()).count(), skipped_empty);
 
-    // part tree
-    let mut part_children: Vec<Vec<usize>> = vec![Vec::new(); moc.parts.len()];
-    let mut root_parts: Vec<usize> = Vec::new();
-    for (i, p) in moc.parts.iter().enumerate() {
-        if p.parent_part >= 0 && (p.parent_part as usize) < moc.parts.len() {
-            part_children[p.parent_part as usize].push(i);
-        } else {
-            root_parts.push(i);
-        }
-    }
-    let mut mesh_children: Vec<Vec<usize>> = vec![Vec::new(); moc.parts.len()];
-    let mut root_meshes: Vec<usize> = Vec::new();
-    for (i, a) in moc.art_meshes.iter().enumerate() {
-        if layer_of[i].is_none() {
-            continue;
-        }
-        if a.parent_part >= 0 && (a.parent_part as usize) < moc.parts.len() {
-            mesh_children[a.parent_part as usize].push(i);
-        } else {
-            root_meshes.push(i);
-        }
-    }
-
+    // Build the part hierarchy in exact render order. A part whose meshes are
+    // interleaved with other parts' meshes (e.g. neck skin under the jacket,
+    // scarf above it) is split into several groups so the stacking is
+    // identical to the model's draw order.
     let hidden: Vec<bool> = (0..moc.parts.len()).map(|p| model.part_hidden(p) || moc.offscreen_out_parts.get(p).copied().unwrap_or(false)).collect();
-    fn subtree(
-        p: usize,
-        part_children: &[Vec<usize>],
-        mesh_children: &[Vec<usize>],
-        render_pos: &[usize],
-        layer_of: &mut [Option<LayerImage>],
-        moc: &crate::moc3::Moc3,
-        hidden: &[bool],
-    ) -> Option<LayerNode> {
-        let mut subpart_nodes: Vec<LayerNode> = Vec::new();
-        for &sp in &part_children[p] {
-            if let Some(n) = subtree(sp, part_children, mesh_children, render_pos, layer_of, moc, hidden) {
-                subpart_nodes.push(n);
-            }
+    let chain_of = |mi: usize| -> Vec<usize> {
+        let mut chain = Vec::new();
+        let (mut part, mut guard) = (moc.art_meshes[mi].parent_part, 0);
+        while part >= 0 && (part as usize) < moc.parts.len() && guard < 64 {
+            chain.push(part as usize);
+            part = moc.parts[part as usize].parent_part;
+            guard += 1;
         }
-        let mesh_indices = mesh_children[p].clone();
-        let mut mesh_nodes: Vec<LayerNode> = Vec::new();
-        for &mi in &mesh_indices {
-            mesh_nodes.push(LayerNode::Image(layer_of[mi].take().unwrap()));
+        chain.reverse();
+        chain
+    };
+    let mut leaves: Vec<usize> = (0..moc.art_meshes.len()).filter(|&i| layer_of[i].is_some()).collect();
+    leaves.sort_by_key(|&i| (render_pos[i], i));
+
+    struct Open {
+        part: usize,
+        group: LayerGroup,
+    }
+    fn close_top(stack: &mut Vec<Open>, root: &mut LayerGroup) {
+        let open = stack.pop().unwrap();
+        let node = LayerNode::Group(open.group);
+        match stack.last_mut() {
+            Some(parent) => parent.group.children.push(node),
+            None => root.children.push(node),
         }
-        if subpart_nodes.is_empty() && mesh_nodes.is_empty() {
-            return None;
+    }
+    let mut root = LayerGroup { name: "root".into(), visible: true, children: Vec::new() };
+    let mut stack: Vec<Open> = Vec::new();
+    let mut seen = vec![0usize; moc.parts.len()];
+    for mi in leaves {
+        let chain = chain_of(mi);
+        let common = stack.iter().zip(&chain).take_while(|(o, p)| o.part == **p).count();
+        while stack.len() > common {
+            close_top(&mut stack, &mut root);
         }
-        // Merge and sort by render position
-        let mut items: Vec<LayerNode> = Vec::new();
-        items.extend(subpart_nodes);
-        items.extend(mesh_nodes);
-        items.sort_by_key(|n| n.min_render_pos(render_pos));
-        Some(LayerNode::Group(LayerGroup {
-            name: moc.parts[p].id.clone(),
-            visible: !hidden[p],
-            children: items,
-        }))
+        for &p in &chain[common..] {
+            seen[p] += 1;
+            let name = if seen[p] == 1 { moc.parts[p].id.clone() } else { format!("{} ({})", moc.parts[p].id, seen[p]) };
+            stack.push(Open { part: p, group: LayerGroup { name, visible: !hidden[p], children: Vec::new() } });
+        }
+        let node = LayerNode::Image(layer_of[mi].take().unwrap());
+        match stack.last_mut() {
+            Some(o) => o.group.children.push(node),
+            None => root.children.push(node),
+        }
+    }
+    while !stack.is_empty() {
+        close_top(&mut stack, &mut root);
     }
 
-    let mut items: Vec<LayerNode> = Vec::new();
-    for &rp in &root_parts {
-        if let Some(n) = subtree(rp, &part_children, &mesh_children, &render_pos, &mut layer_of, moc, &hidden)
-        {
-            items.push(n);
-        }
-    }
-    for &mi in &root_meshes {
-        items.push(LayerNode::Image(layer_of[mi].take().unwrap()));
-    }
-    items.sort_by_key(|n| n.min_render_pos(&render_pos));
-
-    (
-        LayerGroup {
-            name: "root".into(),
-            visible: true,
-            children: items,
-        },
-        size.0,
-        size.1,
-    )
+    (root, size.0, size.1)
 }
 
 pub mod ora;

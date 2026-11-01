@@ -18,6 +18,7 @@ pub mod pose3;
 pub mod userdata3;
 
 pub use decompiler::{
+    debug_default_positions,
     Decompiler, DisplayNames, Model3Decompilation, Texture, decompile, decompile_model3,
     decompile_model3_to_files, decompile_model3_with, decompile_to_file,
 };

@@ -15,6 +15,13 @@ pub(super) struct EvaluatedGeometry {
     meshes: Vec<MeshGeometry>,
 }
 
+/// Default-pose canvas positions of every art mesh (independent evaluator,
+/// handy for cross-checking another implementation).
+pub(super) fn debug_default_positions(model: &Moc3Model) -> Result<Vec<Vec<[f32; 2]>>> {
+    let pose = pose::DefaultPose::evaluate(model)?;
+    (0..model.art_meshes().len()).map(|i| Ok(pose.mesh_positions(i)?.to_vec())).collect()
+}
+
 impl EvaluatedGeometry {
     pub(super) fn evaluate(model: &Moc3Model, textures: &[Texture]) -> Result<Self> {
         let pose = pose::DefaultPose::evaluate(model)?;

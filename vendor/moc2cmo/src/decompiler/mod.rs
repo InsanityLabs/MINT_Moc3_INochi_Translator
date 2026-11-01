@@ -490,3 +490,9 @@ fn referenced_json_paths(references: &crate::model3::Model3References) -> Vec<St
     );
     paths
 }
+
+/// Default-pose canvas positions per art mesh from moc2cmo's own evaluator.
+pub fn debug_default_positions(moc3: &[u8]) -> Result<Vec<Vec<[f32; 2]>>> {
+    let model = Moc3Model::parse(moc3)?;
+    geometry::debug_default_positions(&model)
+}

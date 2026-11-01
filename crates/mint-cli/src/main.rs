@@ -157,6 +157,49 @@ fn main() -> std::io::Result<()> {
                     p.binding_sources_begin, p.binding_sources_count);
             }
         }
+        "aspect" => {
+            let textures = load_textures(&path);
+            let mut model = Model::new(&moc);
+            model.hide_default_hidden(&path);
+            for (mi, am) in moc.art_meshes.iter().enumerate() {
+                let (v, op, _) = model.art_mesh(mi);
+                if v.is_empty() || op <= 0.001 { continue; }
+                let px: Vec<_> = v.iter().map(|p| model.canvas_to_px(*p)).collect();
+                let tex = &textures[(am.texture_no as usize).min(textures.len() - 1)];
+                let ub = am.uv_begin.max(0) as usize / 2;
+                let uvs: Vec<[f32; 2]> = (0..v.len()).map(|i| moc.uvs[ub + i]).collect();
+                let rng = |it: &mut dyn Iterator<Item = f32>| { let (mut lo, mut hi) = (f32::MAX, f32::MIN); for x in it { lo = lo.min(x); hi = hi.max(x); } hi - lo };
+                let (cw, ch) = (rng(&mut px.iter().map(|p| p.x)), rng(&mut px.iter().map(|p| p.y)));
+                let (tw, th) = (rng(&mut uvs.iter().map(|u| u[0])) * tex.width() as f32, rng(&mut uvs.iter().map(|u| u[1])) * tex.height() as f32);
+                if tw < 8.0 || th < 8.0 { continue; }
+                println!("{mi}	{}	sx={:.2}	sy={:.2}	ratio={:.2}	canvas={:.0}x{:.0}	tex={:.0}x{:.0}", am.id, cw / tw, ch / th, (ch / th) / (cw / tw), cw, ch, tw, th);
+            }
+        }
+        "crosscheck" => {
+            let mut model = Model::new(&moc);
+            let other = moc2cmo::debug_default_positions(&std::fs::read(&path).expect("read")).expect("moc2cmo eval");
+            let mut worst: Vec<(f32, usize)> = Vec::new();
+            for (mi, o) in other.iter().enumerate() {
+                let (v, _, _) = model.art_mesh(mi);
+                if v.len() != o.len() { println!("mesh {mi} vertex count differs {} vs {}", v.len(), o.len()); continue; }
+                let d = v.iter().zip(o).map(|(a, b)| { let p = model.canvas_to_px(*a); ((p.x - b[0]).powi(2) + (p.y - b[1]).powi(2)).sqrt() }).fold(0.0f32, f32::max);
+                worst.push((d, mi));
+            }
+            worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            println!("{} meshes compared; worst vertex deviation (px):", worst.len());
+            let textures = load_textures(&path);
+            for (d, mi) in worst.iter().take(15) {
+                let am = &moc.art_meshes[*mi];
+                let (v, _, _) = model.art_mesh(*mi);
+                let ours: Vec<[f32; 2]> = v.iter().map(|a| { let p = model.canvas_to_px(*a); [p.x, p.y] }).collect();
+                let tex = &textures[(am.texture_no as usize).min(textures.len() - 1)];
+                let ub = am.uv_begin.max(0) as usize / 2;
+                let ext = |pts: &[[f32; 2]], k: usize| { let lo = pts.iter().map(|p| p[k]).fold(f32::MAX, f32::min); let hi = pts.iter().map(|p| p[k]).fold(f32::MIN, f32::max); hi - lo };
+                let uvs: Vec<[f32; 2]> = (0..v.len()).map(|i| [moc.uvs[ub + i][0] * tex.width() as f32, moc.uvs[ub + i][1] * tex.height() as f32]).collect();
+                let (tw, th) = (ext(&uvs, 0), ext(&uvs, 1));
+                println!("  mesh {mi} {} : {d:.1}px | tex {tw:.0}x{th:.0} | ours {:.0}x{:.0} | moc2cmo {:.0}x{:.0}", am.id, ext(&ours, 0), ext(&ours, 1), ext(&other[*mi], 0), ext(&other[*mi], 1));
+            }
+        }
         "order" => {
             let mut model = Model::new(&moc);
             for (pos, m) in model.render_order().into_iter().enumerate() {

@@ -103,6 +103,7 @@ pub struct Model<'a> {
     warp_local: Vec<Option<Vec<Vec2>>>,   // grid verts in parent space
     rot_local: Vec<Option<TransformData>>,
     rot_world: Vec<Option<RotWorld>>,
+    warp_world: Vec<Option<Vec<Vec2>>>,
     hidden_parts: Vec<bool>,
 }
 
@@ -146,6 +147,7 @@ impl<'a> Model<'a> {
             warp_local: vec![None; moc.warp_deformers.len()],
             rot_local: vec![None; moc.rotation_deformers.len()],
             rot_world: vec![None; moc.deformers.len()],
+            warp_world: vec![None; moc.deformers.len()],
             hidden_parts: vec![false; moc.parts.len()],
         }
     }
@@ -195,6 +197,7 @@ impl<'a> Model<'a> {
         self.warp_local.fill(None);
         self.rot_local.fill(None);
         self.rot_world.fill(None);
+        self.warp_world.fill(None);
     }
 
     /// Bound (param, keys) pairs for an object given its
@@ -295,6 +298,22 @@ impl<'a> Model<'a> {
         grid
     }
 
+    fn warp_world_grid(&mut self, di: usize) -> Vec<Vec2> {
+        if let Some(g) = &self.warp_world[di] {
+            return g.clone();
+        }
+        let d = &self.moc.deformers[di];
+        let (wi, parent) = (d.specific_index as usize, d.parent_deformer);
+        let local = self.warp_local_grid(wi);
+        let world: Vec<Vec2> = if parent < 0 {
+            local
+        } else {
+            local.into_iter().map(|pt| self.point_to_canvas(parent, pt)).collect()
+        };
+        self.warp_world[di] = Some(world.clone());
+        world
+    }
+
     /// Map a point expressed in deformer `di`'s child-space into canvas
     /// space, recursively.
     fn point_to_canvas(&mut self, di: i32, p: Vec2) -> Vec2 {
@@ -304,10 +323,13 @@ impl<'a> Model<'a> {
         let d = &self.moc.deformers[di as usize];
         let parent_space = match d.ty {
             DeformerType::Warp => {
+                // Cubism maps the lattice points through the parent chain and
+                // interpolates in canvas space (not the other way round).
                 let wi = d.specific_index as usize;
-                let local = self.warp_local_grid(wi);
+                let world = self.warp_world_grid(di as usize);
                 let quad = self.moc.warp_deformer_quad_source[wi];
-                warp_apply(&local, self.moc.warp_deformers[wi].rows as usize, self.moc.warp_deformers[wi].columns as usize, quad, p)
+                let wd = &self.moc.warp_deformers[wi];
+                return warp_apply(&world, wd.rows as usize, wd.columns as usize, quad, p);
             }
             DeformerType::Rotation => {
                 let w = self.rot_world_of(di as usize);
@@ -636,28 +658,32 @@ impl<'a> Model<'a> {
 
 /// Apply a warp deformer grid to a normalized-grid point.
 fn warp_apply(grid: &[Vec2], rows: usize, columns: usize, quad: bool, p: Vec2) -> Vec2 {
-    let gp = p * Vec2::new(columns as f32, rows as f32);
-    let cp = columns + 1;
-    if p.x >= 0.0 && p.x < 1.0 && p.y >= 0.0 && p.y < 1.0 {
-        let gx = (gp.x as usize).min(columns - 1);
-        let gy = (gp.y as usize).min(rows - 1);
-        let i = gx + gy * cp;
-        let f = Vec2::new(gp.x - gx as f32, gp.y - gy as f32);
-        let (a, b, c, d) = (grid[i], grid[i + 1], grid[i + cp], grid[i + cp + 1]);
-        if quad {
-            bilinear(f, a, b, c, d)
+    // Points outside the lattice extend the nearest edge cell (u / v leave 0..1)
+    // instead of using one global parallelogram, which squashes strongly
+    // warped lattices.
+    let cell = |v: f32, n: usize| -> usize {
+        if v <= 0.0 {
+            0
+        } else if v >= n as f32 {
+            n - 1
         } else {
-            triangular(f, a, b, c, d)
+            v as usize
         }
+    };
+    let (gx, gy) = (p.x * columns as f32, p.y * rows as f32);
+    let (col, row) = (cell(gx, columns), cell(gy, rows));
+    let (u, v) = (gx - col as f32, gy - row as f32);
+    let cp = columns + 1;
+    let i = row * cp + col;
+    let (p00, p10, p01, p11) = (grid[i], grid[i + 1], grid[i + cp], grid[i + cp + 1]);
+    if quad {
+        let top = p00 * (1.0 - u) + p10 * u;
+        let bottom = p01 * (1.0 - u) + p11 * u;
+        top * (1.0 - v) + bottom * v
+    } else if u + v <= 1.0 {
+        p00 * (1.0 - u - v) + p10 * u + p01 * v
     } else {
-        // Extrapolation: approximate with the outer parallelogram.
-        let centroid = (grid[0] + grid[columns] + grid[rows * cp] + grid[columns + rows * cp]) / 4.0;
-        let d1 = grid[columns + rows * cp] - grid[0];
-        let d2 = grid[columns] - grid[rows * cp];
-        let vx = (d1 + d2) / 2.0;
-        let vy = (d1 - d2) / 2.0;
-        let origin = centroid - d1 * 0.5;
-        origin + vx * p.x + vy * p.y
+        p11 * (u + v - 1.0) + p01 * (1.0 - u) + p10 * (1.0 - v)
     }
 }
 

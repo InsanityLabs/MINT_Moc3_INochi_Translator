@@ -87,6 +87,7 @@ These come from what the target formats can express:
   Conjoint / Disjoint alpha blends, so editable layers are exported as plain
   layers and "Out" cut-out parts are exported *hidden*. The merged preview and
   composite image do apply them.
+- **Interleaved parts in PSD/ORA:** when one part's meshes are drawn both below and above another part's (e.g. neck skin under a jacket, scarf over it), the part is split into several groups (`Part (2)`, ...) so the layer stacking matches the model's draw order exactly.
 - **Offscreen opacity** is applied per mesh rather than to the group buffer
   (identical unless meshes inside one group overlap while translucent).
 - **Inochi physics** is an approximation: Live2D physics is mapped to Inochi
