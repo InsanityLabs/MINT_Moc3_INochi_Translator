@@ -161,19 +161,39 @@ pub fn write_psd<W: Write>(
 
     // ---- color mode data + image resources ----
     out.write_all(&0u32.to_be_bytes())?;
-    out.write_all(&0u32.to_be_bytes())?;
+    let mut res = Vec::new();
+    let n_recs = recs.len();
+    let mut resource = |id: u16, data: &[u8]| {
+        res.extend_from_slice(b"8BIM");
+        res.extend_from_slice(&id.to_be_bytes());
+        res.extend_from_slice(&[0u8, 0u8]); // empty pascal name, padded
+        res.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        res.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            res.push(0);
+        }
+    };
+    // 1005 ResolutionInfo: 72 dpi
+    resource(1005, &[0x00, 0x48, 0, 0, 0, 1, 0, 1, 0x00, 0x48, 0, 0, 0, 1, 0, 1]);
+    // 1024 layer state (active layer), 1026 layer group ids, 1072 group-enabled flags
+    resource(1024, &0u16.to_be_bytes());
+    resource(1026, &vec![0u8; n_recs * 2]);
+    resource(1072, &vec![1u8; n_recs]);
+    out.write_all(&(res.len() as u32).to_be_bytes())?;
+    out.write_all(&res)?;
 
     // ---- layer records + channel data ----
     let mut rec_bytes = Vec::new();
     let mut chan_bytes = Vec::new();
     let n_layers = recs.len() as i16;
-    for rec in &recs {
+    for (rec_idx, rec) in recs.iter().enumerate() {
+        let layer_id = rec_idx as u32 + 2;
         match rec {
             Rec::Group(..) => {
-                write_group_record(rec, &mut rec_bytes)?;
+                write_group_record(rec, &mut rec_bytes, &mut chan_bytes, layer_id)?;
             }
             Rec::Image(li) => {
-                write_image_record(li, &mut rec_bytes, &mut chan_bytes)?;
+                write_image_record(li, &mut rec_bytes, &mut chan_bytes, layer_id)?;
             }
         }
     }
@@ -239,49 +259,77 @@ fn pascal_name(name: &str, extra: &mut Vec<u8>) {
 }
 
 fn luni(name: &str, extra: &mut Vec<u8>) {
+    let utf16: Vec<u16> = name.encode_utf16().collect();
+    let mut body = Vec::with_capacity(4 + utf16.len() * 2 + 2);
+    body.extend_from_slice(&(utf16.len() as u32).to_be_bytes());
+    for u in &utf16 {
+        body.extend_from_slice(&u.to_be_bytes());
+    }
+    // the declared block length includes its padding (multiple of 4)
+    pad4(&mut body);
     extra.extend_from_slice(b"8BIM");
     extra.extend_from_slice(b"luni");
-    let utf16: Vec<u16> = name.encode_utf16().collect();
-    let data_len = 4 + utf16.len() * 2;
-    extra.extend_from_slice(&(data_len as u32).to_be_bytes());
-    extra.extend_from_slice(&(utf16.len() as u32).to_be_bytes());
-    for u in &utf16 {
-        extra.extend_from_slice(&u.to_be_bytes());
+    extra.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    extra.extend_from_slice(&body);
+}
+
+/// Default (full-range) layer blending ranges, as Photoshop writes them.
+fn blending_ranges(extra: &mut Vec<u8>) {
+    extra.extend_from_slice(&40u32.to_be_bytes());
+    for _ in 0..10 {
+        extra.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF]);
     }
-    // tagged blocks pad to 4
-    pad4(extra);
+}
+
+fn tagged(key: &[u8; 4], data: &[u8], extra: &mut Vec<u8>) {
+    extra.extend_from_slice(b"8BIM");
+    extra.extend_from_slice(key);
+    let mut body = data.to_vec();
+    pad4(&mut body);
+    extra.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    extra.extend_from_slice(&body);
 }
 
 fn lsct(kind: u32, extra: &mut Vec<u8>) {
-    extra.extend_from_slice(b"8BIM");
-    extra.extend_from_slice(b"lsct");
-    extra.extend_from_slice(&4u32.to_be_bytes());
-    extra.extend_from_slice(&kind.to_be_bytes());
-    pad4(extra);
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&kind.to_be_bytes());
+    body.extend_from_slice(b"8BIM");
+    body.extend_from_slice(b"norm");
+    body.extend_from_slice(&0u32.to_be_bytes());
+    tagged(b"lsct", &body, extra);
 }
 
-fn write_group_record(rec: &Rec<'_>, out: &mut Vec<u8>) -> std::io::Result<()> {
+fn write_group_record(rec: &Rec<'_>, out: &mut Vec<u8>, chan: &mut Vec<u8>, layer_id: u32) -> std::io::Result<()> {
     let (name, kind, bbox, visible) = match rec {
         Rec::Group(n, is_open, bbox, vis) => (*n, if *is_open { 1u32 } else { 3u32 }, *bbox, *vis),
         _ => unreachable!(),
     };
-    // Layer rect order per spec: top, left, bottom, right
-    for v in [bbox.1, bbox.0, bbox.3, bbox.2] {
+    // Group records carry no pixels, so (like Photoshop) their rect is empty.
+    let _ = bbox;
+    for v in [0i32, 0, 0, 0] {
         out.write_all(&v.to_be_bytes())?;
     }
-    out.write_all(&0u16.to_be_bytes())?; // no channels
+    // Photoshop gives group records 4 empty channels (just the 2-byte
+    // compression marker each).
+    out.write_all(&4u16.to_be_bytes())?;
+    for id in [-1i16, 0, 1, 2] {
+        out.write_all(&id.to_be_bytes())?;
+        out.write_all(&2u32.to_be_bytes())?;
+        chan.extend_from_slice(&0u16.to_be_bytes());
+    }
     out.write_all(b"8BIM")?;
     out.write_all(b"norm")?;
-    let flags = if kind == 3 { 0x08 } else { 0x00 } | if visible { 0 } else { 0x02 };
+    let flags = 0x18u8 | if visible { 0 } else { 0x02 };
     out.write_all(&[255u8, 0, flags, 0])?; // opacity, clipping, flags, filler
-    // extra data - pad tagged blocks to 4 bytes
     let mut extra = Vec::new();
     extra.extend_from_slice(&0u32.to_be_bytes()); // mask data
-    extra.extend_from_slice(&0u32.to_be_bytes()); // blending ranges
+    blending_ranges(&mut extra);
     pascal_name(name, &mut extra);
-    pad4(&mut extra);
+    luni(name, &mut extra);
+    tagged(b"lyid", &layer_id.to_be_bytes(), &mut extra);
     lsct(kind, &mut extra);
-    pad4(&mut extra);
+    tagged(b"lspf", &0u32.to_be_bytes(), &mut extra);
+    tagged(b"lclr", &[0u8; 8], &mut extra);
     out.write_all(&(extra.len() as u32).to_be_bytes())?;
     out.write_all(&extra)?;
     Ok(())
@@ -291,6 +339,7 @@ fn write_image_record(
     li: &crate::emit::LayerImage,
     rec: &mut Vec<u8>,
     chan: &mut Vec<u8>,
+    layer_id: u32,
 ) -> std::io::Result<()> {
     let (lw, lh) = (li.image.width() as usize, li.image.height() as usize);
     let (top, left) = (li.top, li.left);
@@ -307,7 +356,7 @@ fn write_image_record(
 
     rec.write_all(b"8BIM")?;
     rec.write_all(blend_key(li.blend))?;
-    rec.write_all(&[(li.opacity * 255.0) as u8, 0u8, if li.visible { 0u8 } else { 0x02 }, 0u8])?;
+    rec.write_all(&[(li.opacity * 255.0) as u8, 0u8, 0x08 | if li.visible { 0u8 } else { 0x02 }, 0u8])?;
 
     // channel data first (to know lengths): de-interleave + RLE
     let raw = li.image.as_raw();
@@ -373,9 +422,15 @@ fn write_image_record(
     } else {
         extra.extend_from_slice(&0u32.to_be_bytes());
     }
-    extra.extend_from_slice(&0u32.to_be_bytes());
+    blending_ranges(&mut extra);
     pascal_name(&li.name, &mut extra);
     luni(&li.name, &mut extra);
+    tagged(b"lyid", &layer_id.to_be_bytes(), &mut extra);
+    tagged(b"clbl", &[1, 0, 0, 0], &mut extra);
+    tagged(b"infx", &[0, 0, 0, 0], &mut extra);
+    tagged(b"knko", &[0, 0, 0, 0], &mut extra);
+    tagged(b"lspf", &0u32.to_be_bytes(), &mut extra);
+    tagged(b"lclr", &[0u8; 8], &mut extra);
     rec.write_all(&(extra.len() as u32).to_be_bytes())?;
     rec.write_all(&extra)?;
     Ok(())
