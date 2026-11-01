@@ -15,6 +15,7 @@ pub use texture::Texture;
 
 /// When set, every mesh/deformer keyform is written fully opaque so that
 /// hidden or animation-only artwork is visible in the editor.
+pub(crate) static GUESS_PAIRS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) static FORCE_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Display names and parameter grouping recovered from a `cdi3.json`
@@ -33,12 +34,15 @@ pub struct DisplayNames {
     /// Part ids to mark hidden in the editor (e.g. alternate arm sets
     /// that a pose3.json hides at startup).
     pub hidden_parts: std::collections::HashSet<String>,
+    /// Physics document written into the editor's physics settings.
+    pub physics: Option<Physics3>,
 }
 
 impl DisplayNames {
     /// Builds display names from a parsed `cdi3.json` document.
     pub fn from_display_info(info: &DisplayInfo3) -> Self {
         Self {
+            physics: None,
             parameter_names: info
                 .parameters()
                 .iter()
@@ -71,6 +75,7 @@ impl DisplayNames {
 #[derive(Debug, Clone)]
 pub struct Decompiler {
     force_visible: bool,
+    guess_pairs: bool,
     deformer_parts: Vec<Option<usize>>,
     draw_ranks: Vec<i32>,
     model_name: String,
@@ -84,6 +89,7 @@ impl Default for Decompiler {
     fn default() -> Self {
         Self {
             force_visible: false,
+            guess_pairs: false,
             deformer_parts: Vec::new(),
             draw_ranks: Vec::new(),
             model_name: "Decompiled Model".into(),
@@ -102,6 +108,12 @@ impl Decompiler {
     }
 
     /// Forces all keyform opacities to 1 so hidden artwork is visible.
+    /// Also combine X/Y parameter pairs beyond Cubism's standard template
+    /// (a guess from the `...X`/`...Y` naming).
+    pub fn set_guess_pairs(&mut self, on: bool) {
+        self.guess_pairs = on;
+    }
+
     pub fn set_force_visible(&mut self, on: bool) {
         self.force_visible = on;
     }
@@ -166,6 +178,7 @@ impl Decompiler {
         let model = Moc3Model::parse(moc3)?;
         let textures = texture::complete_texture_set(&model, &self.textures);
         FORCE_VISIBLE.store(self.force_visible, std::sync::atomic::Ordering::Relaxed);
+        GUESS_PAIRS.store(self.guess_pairs, std::sync::atomic::Ordering::Relaxed);
         let main_xml = xml::generate(
             &model,
             &self.model_name,
@@ -331,7 +344,7 @@ fn build_model3_projects(model3_path: &Path, mut decompiler: Decompiler) -> Resu
         };
         let path_text = path.to_string_lossy();
         if path_text.ends_with(".physics3.json") {
-            Physics3::from_json_bytes(&bytes)?;
+            decompiler.display_names.physics = Some(Physics3::from_json_bytes(&bytes)?);
         } else if path_text.ends_with(".pose3.json") {
             Pose3::from_json_bytes(&bytes)?;
         } else if path_text.ends_with(".userdata3.json") {
@@ -339,8 +352,10 @@ fn build_model3_projects(model3_path: &Path, mut decompiler: Decompiler) -> Resu
         } else if path_text.ends_with(".cdi3.json") {
             let info = DisplayInfo3::from_json_bytes(&bytes)?;
             let hidden = std::mem::take(&mut decompiler.display_names.hidden_parts);
+            let physics = decompiler.display_names.physics.take();
             let mut names = DisplayNames::from_display_info(&info);
             names.hidden_parts = hidden;
+            names.physics = physics;
             decompiler.set_display_names(names);
         } else {
             let _ = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
@@ -406,6 +421,10 @@ fn build_model3_projects(model3_path: &Path, mut decompiler: Decompiler) -> Resu
             }
         }
     }
+    let canvas = Moc3Model::parse(&moc3).ok().map(|m| {
+        let s = m.canvas().size();
+        (s[0].max(1.0) as u32, s[1].max(1.0) as u32)
+    });
     let mut motions = Vec::new();
     for (group, entries) in &references.motions {
         for (index, entry) in entries.iter().enumerate() {
@@ -416,7 +435,13 @@ fn build_model3_projects(model3_path: &Path, mut decompiler: Decompiler) -> Resu
             };
             let motion = Motion3::from_json_bytes(&bytes)?;
             motions.push(crate::can3::MotionInstance {
-                name: format!("{group}_{index}"),
+                name: {
+                    let file = entry.file.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(&entry.file);
+                    let stem = file.strip_suffix(".motion3.json").unwrap_or(file);
+                    if stem.is_empty() { format!("{group}_{index}") } else { stem.to_string() }
+                },
+                tag: group.clone(),
+                canvas,
                 motion,
                 fade_in_time: entry.fade_in_time,
                 fade_out_time: entry.fade_out_time,

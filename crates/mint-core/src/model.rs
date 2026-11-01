@@ -103,6 +103,7 @@ pub struct Model<'a> {
     warp_local: Vec<Option<Vec<Vec2>>>,   // grid verts in parent space
     rot_local: Vec<Option<TransformData>>,
     rot_world: Vec<Option<RotWorld>>,
+    hidden_parts: Vec<bool>,
 }
 
 /// Full child-space -> canvas transform of a rotation deformer.
@@ -145,7 +146,45 @@ impl<'a> Model<'a> {
             warp_local: vec![None; moc.warp_deformers.len()],
             rot_local: vec![None; moc.rotation_deformers.len()],
             rot_world: vec![None; moc.deformers.len()],
+            hidden_parts: vec![false; moc.parts.len()],
         }
+    }
+
+    /// Hide every mesh inside the given parts (by id) in this model's
+    /// evaluation, e.g. pose-hidden alternates or offscreen "Out" parts.
+    pub fn hide_parts(&mut self, ids: &std::collections::HashSet<String>) {
+        for (i, p) in self.moc.parts.iter().enumerate() {
+            self.hidden_parts[i] = ids.contains(&p.id);
+        }
+    }
+
+    /// Hide the parts the model's pose/offscreen data say are off by default.
+    pub fn hide_default_hidden(&mut self, moc_path: &std::path::Path) {
+        let mut ids = crate::emit::hidden_parts(self.moc, Some(moc_path));
+        // "Out" parts are cut-outs handled by the renderer, not hidden.
+        for (p, out) in self.moc.parts.iter().zip(&self.moc.offscreen_out_parts) {
+            if *out {
+                ids.remove(&p.id);
+            }
+        }
+        self.hide_parts(&ids);
+    }
+
+    /// Nearest ancestor part of mesh `mi` that is an offscreen "Out" cut-out.
+    pub fn out_ancestor(&self, mi: usize) -> Option<usize> {
+        let (mut part, mut guard) = (self.moc.art_meshes[mi].parent_part, 0);
+        while part >= 0 && (part as usize) < self.moc.parts.len() && guard < 64 {
+            if self.moc.offscreen_out_parts.get(part as usize).copied().unwrap_or(false) {
+                return Some(part as usize);
+            }
+            part = self.moc.parts[part as usize].parent_part;
+            guard += 1;
+        }
+        None
+    }
+
+    pub fn part_hidden(&self, part: usize) -> bool {
+        self.hidden_parts.get(part).copied().unwrap_or(false)
     }
 
     /// Reset memoized state after changing `params`.
@@ -414,6 +453,29 @@ impl<'a> Model<'a> {
 
     // ---------------- public API ----------------
 
+    /// Interpolated (multiply, screen) colours of art mesh `mi`; white / black when
+    /// the model has no keyform colours.
+    pub fn mesh_colors(&mut self, mi: usize) -> ([f32; 3], [f32; 3]) {
+        let am = &self.moc.art_meshes[mi];
+        let begin = self.moc.mesh_color_begin.get(mi).copied().unwrap_or(-1);
+        let (mut mul, mut scr) = ([1.0f32; 3], [0.0f32; 3]);
+        if begin < 0 || self.moc.multiply_colors.is_empty() {
+            return (mul, scr);
+        }
+        let w = self.weights(am.keyform_binding_source).to_vec();
+        (mul, scr) = ([0.0; 3], [0.0; 3]);
+        for (k, &wt) in w.iter().enumerate() {
+            let i = begin as usize + k;
+            let m = self.moc.multiply_colors.get(i).copied().unwrap_or([1.0; 3]);
+            let s = self.moc.screen_colors.get(i).copied().unwrap_or([0.0; 3]);
+            for ch in 0..3 {
+                mul[ch] += m[ch] * wt;
+                scr[ch] += s[ch] * wt;
+            }
+        }
+        (mul, scr)
+    }
+
     /// Interpolated vertex positions of art mesh `mi` in canvas units,
     /// its final opacity, and its interpolated draw order.
     pub fn art_mesh(&mut self, mi: usize) -> (Vec<Vec2>, f32, f32) {
@@ -441,6 +503,16 @@ impl<'a> Model<'a> {
         } else {
             1.0
         };
+        let mut parent_chain_opacity = parent_chain_opacity;
+        let (mut part, mut guard) = (am.parent_part, 0);
+        while part >= 0 && (part as usize) < self.moc.parts.len() && guard < 64 {
+            parent_chain_opacity *= self.moc.part_offscreen_opacity.get(part as usize).copied().unwrap_or(1.0);
+            if self.hidden_parts.get(part as usize).copied().unwrap_or(false) {
+                parent_chain_opacity = 0.0;
+            }
+            part = self.moc.parts[part as usize].parent_part;
+            guard += 1;
+        }
         let verts: Vec<Vec2> = verts
             .into_iter()
             .map(|v| self.point_to_canvas(am.parent_deformer, v))

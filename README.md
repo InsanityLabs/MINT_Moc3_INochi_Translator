@@ -20,12 +20,12 @@ responsible for what you do with it.
 
 | Format | Opens in | Notes |
 |---|---|---|
-| `.psd` | Photoshop, Krita | Real layered PSD v1; part hierarchy as layer groups, render-order z-stacking |
-| `.ora` | Krita, GIMP | OpenRaster with the same group hierarchy |
+| `.psd` | Photoshop, Krita | Real layered PSD v1; part hierarchy as groups, render-order stacking, full unmasked art plus real layer masks, default-hidden layers/groups switched off |
+| `.ora` | Krita, GIMP | OpenRaster with the same hierarchy and visibility; masks ship as hidden `<layer>.mask` layers (ORA has no layer masks) |
 | `.cmo3` | Cubism Editor 5.3 | Reconstructed project: parts, warps, rotations, parameters, keyforms, masks, textures |
 | `.can3` | Cubism Editor 5.3 | Animation file generated when motion data is present |
 | `.inp` | Inochi2D runtimes | Runtime puppet with baked parameter bindings |
-| `.inx` | Inochi2D Creator | Editable project (node tree, meshes, bindings, sidecar files embedded) |
+| `.inx` | Inochi2D Creator | Editable project (node tree, meshes, bindings, physics, tints, sidecar files embedded) |
 
 ## GUI
 
@@ -54,6 +54,8 @@ Options:
 - `--all` — include hidden / animation-only layers in PSD/ORA.
 - `--cmo3-visible` — force everything visible in the `.cmo3` (breaks
   hair/clothing toggles; off by default).
+- `--guess-pairs` — also combine non-standard X/Y parameter pairs (a guess; off
+  by default).
 - `export <moc3> <stem> --ora|--psd|--cmo3|--inp` — pick formats individually.
 
 ## Supported input
@@ -67,18 +69,45 @@ into the `.cmo3`/`.inp`/`.inx` where possible.
 Verified on the four official Live2D sample models (Mark, Haru, Hiyori, Ren —
 moc3 versions 1, 3, 3 and 6) and on custom models.
 
+## Cubism 5.3 (v6) support
+
+v6 models are rendered with their real data: per-mesh colour blends (linear
+burn, multiply, screen, overlay ...), multiply/screen keyform colours,
+offscreen parts (group buffers with the "Out" cut-out and the other alpha
+blends), part-level offscreen masks and opacity. PSD/ORA layers carry the
+blend modes (PSD blend keys / ORA composite-ops) and Inochi gets the nearest
+Inochi blend mode.
+
 ## Known limitations
 
-- **Cubism 5.3 (v6) models:** blend modes and offscreen drawing are
-  approximated. Parts using the "Out" alpha blend and pose-hidden parts are
-  exported hidden by default; some mask lists stored in the new sections are
-  not yet reconstructed.
-- **Physics:** `physics3.json` is embedded into outputs, but editor-side
-  physics objects in `.cmo3` are not fully reconstructed (schema undocumented).
-- **Masks:** standard clipping masks are preserved; masks that live on
-  offscreen parts (Cubism 5.3) are not yet.
-- Expressions and motions are embedded as resources; they are not rebuilt
-  into editor-native objects.
+These come from what the target formats can express:
+
+- **Offscreen / alpha blends in editable files:** PSD, ORA, Inochi and the
+  `.cmo3` have no equivalent of Cubism's offscreen drawing or its Atop / Out /
+  Conjoint / Disjoint alpha blends, so editable layers are exported as plain
+  layers and "Out" cut-out parts are exported *hidden*. The merged preview and
+  composite image do apply them.
+- **Offscreen opacity** is applied per mesh rather than to the group buffer
+  (identical unless meshes inside one group overlap while translucent).
+- **Inochi physics** is an approximation: Live2D physics is mapped to Inochi
+  `SimplePhysics` nodes (an anchor moved by the input parameters swings a
+  pendulum that writes the output parameter). Inochi's solver differs from
+  Live2D's, so the sway needs tuning per model.
+- **Expressions** are separate `.exp3.json` files in Cubism (not part of the
+  `.cmo3`), so they are copied/embedded as-is.
+- **Parameters that do nothing** are a property of the source model: some have
+  no keyforms in the moc3 (editor dividers, unused standard params, params only
+  read by VTube Studio, physics outputs nothing is bound to). The GUI lists
+  how many per model; dividers are dropped from the Inochi export.
+- **2D (combined) parameters:** the moc3 does not record which parameters the
+  author combined, so MINT only combines Cubism's standard-template pairs when
+  they sit next to each other (Angle X/Y, Eyeball X/Y, Mouth Form/Open Y).
+  `--guess-pairs` (GUI: "Guess extra 2D parameter pairs") also combines other
+  `...X`/`...Y` pairs by name; usually right but can be wrong.
+
+Not yet verified against Cubism itself: output types other than "Angle" in the
+`.cmo3` physics settings, and the `.can3` motion files (laid out like a
+Cubism-authored `.can3`, one scene per motion).
 
 ## Layout
 

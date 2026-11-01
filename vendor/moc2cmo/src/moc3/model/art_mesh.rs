@@ -52,6 +52,8 @@ pub(super) fn parse_art_meshes(
         [0.0; 3],
     )?;
 
+    let inherited = offscreen_masks(reader, offsets, counts, &masks)?;
+
     ids.into_iter()
         .enumerate()
         .map(|(index, id)| {
@@ -78,7 +80,7 @@ pub(super) fn parse_art_meshes(
                 masks.len(),
                 "drawable masks",
             )?;
-            let mask_drawable_indices = masks[mask_range]
+            let mut mask_drawable_indices = masks[mask_range]
                 .iter()
                 .map(|value| {
                     let value =
@@ -88,6 +90,17 @@ pub(super) fn parse_art_meshes(
                         .ok_or_else(|| invalid("mask index is outside the drawable table"))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let mut part = parent_parts[index];
+            let mut guard = 0;
+            while part >= 0 && guard < 64 {
+                for &m in inherited.masks.get(part as usize).into_iter().flatten() {
+                    if m < count && !mask_drawable_indices.contains(&m) {
+                        mask_drawable_indices.push(m);
+                    }
+                }
+                part = inherited.parents.get(part as usize).copied().unwrap_or(-1);
+                guard += 1;
+            }
             let keyform_range = checked_range(
                 keyform_begins[index],
                 keyform_counts[index],
@@ -173,4 +186,42 @@ fn parse_keyforms(
         });
     }
     Ok(keyforms)
+}
+
+struct OffscreenMasks {
+    parents: Vec<i32>,
+    masks: Vec<Vec<usize>>,
+}
+
+/// Cubism 5.3 (moc3 v6): masks attached to a part's offscreen buffer apply to
+/// every drawable inside that part.
+fn offscreen_masks(
+    reader: &Reader<'_>,
+    offsets: &[usize; OFFSET_COUNT],
+    counts: &Counts,
+    masks: &[i32],
+) -> Result<OffscreenMasks> {
+    let n = counts.parts;
+    let mut out = OffscreenMasks { parents: vec![-1; n], masks: vec![Vec::new(); n] };
+    let version = reader.u32(4).map(|v| v & 0xFF).unwrap_or(0);
+    if version < 6 || offsets[149] == 0 || offsets[158] == 0 || offsets[159] == 0 {
+        return Ok(out);
+    }
+    out.parents = read_i32_or(reader, offsets, 9, n, -1)?;
+    let part_off = read_i32(reader, offsets, 149, n)?;
+    let n_off = part_off.iter().copied().max().unwrap_or(-1) + 1;
+    if n_off <= 0 {
+        return Ok(out);
+    }
+    let n_off = n_off as usize;
+    let begins = read_i32(reader, offsets, 158, n_off)?;
+    let cnts = read_i32(reader, offsets, 159, n_off)?;
+    for (p, &o) in part_off.iter().enumerate() {
+        if o < 0 {
+            continue;
+        }
+        let (b, c) = (begins[o as usize].max(0) as usize, cnts[o as usize].max(0) as usize);
+        out.masks[p] = masks.iter().skip(b).take(c).filter_map(|&m| usize::try_from(m).ok()).collect();
+    }
+    Ok(out)
 }

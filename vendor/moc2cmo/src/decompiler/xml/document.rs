@@ -32,7 +32,7 @@ pub(super) fn write_main(
     write_deformer_set(xml, plan, model);
     write_affecter_set(xml, plan);
     write_part_set(xml, plan);
-    write_physics_set(xml);
+    write_physics_set(xml, plan, model);
     reference(xml, "CPartSource", "rootPart", plan.root_part.source);
 
     xml.start("CParameterGroupSet", &[attr("xs.n", "parameterGroupSet")]);
@@ -100,18 +100,211 @@ fn write_icon(xml: &mut XmlWriter, size: u32) {
     xml.end("CImageIcon");
 }
 
-fn write_physics_set(xml: &mut XmlWriter) {
+fn write_physics_set(xml: &mut XmlWriter, plan: &ProjectPlan, model: &Moc3Model) {
+    use serde_json::Value;
+    let name_of = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let num = |v: &Value, d: f32| v.as_f64().map_or(d, |x| x as f32);
+    let flag = |v: &Value| if v.as_bool().unwrap_or(false) { "true" } else { "false" };
+    let param_ref = |id: &str| {
+        model
+            .parameters()
+            .iter()
+            .position(|p| p.id() == id)
+            .map(|i| plan.parameters[i].guid)
+    };
+    let src_type = |t: &str| match t {
+        "X" => "SRC_TO_X",
+        "Y" => "SRC_TO_Y",
+        _ => "SRC_TO_G_ANGLE",
+    };
+    let data_guid = |xml: &mut XmlWriter| {
+        xml.empty(
+            "CPhysicsDataGuid",
+            &[
+                attr("xs.n", "guid"),
+                attr("uuid", &uuid::Uuid::new_v4().to_string()),
+                attr("note", "(no debug info)"),
+            ],
+        )
+    };
+    let items = |v: &Value| -> Vec<Value> { v.as_array().cloned().unwrap_or_default() };
+    let physics = plan.names.physics.as_ref();
+    let settings: Vec<Value> = physics.map(|p| p.settings().to_vec()).unwrap_or_default();
+    let dict: Vec<(String, String)> = physics
+        .map(|p| items(&p.meta()["PhysicsDictionary"]))
+        .unwrap_or_default()
+        .iter()
+        .map(|d| (name_of(&d["Id"]), name_of(&d["Name"])))
+        .collect();
+
     xml.start(
         "CPhysicsSettingsSourceSet",
         &[attr("xs.n", "physicsSettingsSourceSet")],
     );
-    xml.empty(
+    xml.start(
         "carray_list",
-        &[attr("xs.n", "_sourceCubismPhysics"), attr("count", 0)],
+        &[attr("xs.n", "_sourceCubismPhysics"), attr("count", settings.len())],
     );
-    xml.empty("null", &[attr("xs.n", "selectedCubismPhysics")]);
-    xml.text("i", &[attr("xs.n", "settingFPS")], "60");
+    let mut first_uuid: Option<String> = None;
+    for s in &settings {
+        let id = name_of(&s["Id"]);
+        let name = dict
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| id.clone());
+        let setting_uuid = uuid::Uuid::new_v4().to_string();
+        first_uuid.get_or_insert(setting_uuid.clone());
+        xml.start("CPhysicsSettingsSource", &[]);
+        xml.text("s", &[attr("xs.n", "name")], &name);
+        xml.empty(
+            "CPhysicsSettingsGuid",
+            &[
+                attr("xs.n", "guid"),
+                attr("uuid", &setting_uuid),
+                attr("note", "(no debug info)"),
+            ],
+        );
+        xml.empty("CPhysicsSettingId", &[attr("xs.n", "id"), attr("idstr", &id)]);
+
+        let inputs = items(&s["Input"]);
+        xml.start(
+            "carray_list",
+            &[attr("xs.n", "inputs"), attr("count", inputs.len())],
+        );
+        for i in &inputs {
+            xml.start("CPhysicsInput", &[]);
+            data_guid(xml);
+            match param_ref(&name_of(&i["Source"]["Id"])) {
+                Some(r) => reference(xml, "CParameterGuid", "source", r),
+                None => xml.empty("null", &[attr("xs.n", "source")]),
+            }
+            xml.text("f", &[attr("xs.n", "angleScale")], "0.0");
+            write_vec2(xml, "translationScale", 0.0, 0.0);
+            xml.text("f", &[attr("xs.n", "weight")], &fl(num(&i["Weight"], 0.0)));
+            xml.empty(
+                "CPhysicsSourceType",
+                &[
+                    attr("xs.n", "type"),
+                    attr("v", src_type(i["Type"].as_str().unwrap_or(""))),
+                ],
+            );
+            xml.text("b", &[attr("xs.n", "isReverse")], flag(&i["Reflect"]));
+            xml.end("CPhysicsInput");
+        }
+        xml.end("carray_list");
+
+        let outputs = items(&s["Output"]);
+        xml.start(
+            "carray_list",
+            &[attr("xs.n", "outputs"), attr("count", outputs.len())],
+        );
+        for o in &outputs {
+            let ty = o["Type"].as_str().unwrap_or("");
+            let scale = num(&o["Scale"], 1.0);
+            xml.start("CPhysicsOutput", &[]);
+            data_guid(xml);
+            match param_ref(&name_of(&o["Destination"]["Id"])) {
+                Some(r) => reference(xml, "CParameterGuid", "destination", r),
+                None => xml.empty("null", &[attr("xs.n", "destination")]),
+            }
+            xml.text(
+                "i",
+                &[attr("xs.n", "vertexIndex")],
+                &o["VertexIndex"].as_i64().unwrap_or(0).to_string(),
+            );
+            let (tx, ty_) = match ty {
+                "X" => (scale, 0.0),
+                "Y" => (0.0, scale),
+                _ => (0.0, 0.0),
+            };
+            write_vec2(xml, "translationScale", tx, ty_);
+            xml.text(
+                "f",
+                &[attr("xs.n", "angleScale")],
+                &fl(if ty == "Angle" { scale } else { 0.0 }),
+            );
+            xml.text("f", &[attr("xs.n", "weight")], &fl(num(&o["Weight"], 100.0)));
+            xml.empty(
+                "CPhysicsSourceType",
+                &[attr("xs.n", "type"), attr("v", src_type(ty))],
+            );
+            xml.text("b", &[attr("xs.n", "isReverse")], flag(&o["Reflect"]));
+            xml.end("CPhysicsOutput");
+        }
+        xml.end("carray_list");
+
+        let verts = items(&s["Vertices"]);
+        xml.start(
+            "carray_list",
+            &[attr("xs.n", "vertices"), attr("count", verts.len())],
+        );
+        for v in &verts {
+            xml.start("CPhysicsVertex", &[]);
+            data_guid(xml);
+            write_vec2(
+                xml,
+                "position",
+                num(&v["Position"]["X"], 0.0),
+                num(&v["Position"]["Y"], 0.0),
+            );
+            for (k, f) in [
+                ("mobility", "Mobility"),
+                ("delay", "Delay"),
+                ("acceleration", "Acceleration"),
+                ("radius", "Radius"),
+            ] {
+                xml.text("f", &[attr("xs.n", k)], &fl(num(&v[f], 0.0)));
+            }
+            xml.end("CPhysicsVertex");
+        }
+        xml.end("carray_list");
+
+        for (kind, key) in [("Position", "normalizedPosition"), ("Angle", "normalizedAngle")] {
+            let n = &s["Normalization"][kind];
+            for (suffix, field, d) in [
+                ("ValueMax", "Maximum", 10.0),
+                ("ValueMin", "Minimum", -10.0),
+                ("DefaultValue", "Default", 0.0),
+            ] {
+                xml.text(
+                    "f",
+                    &[attr("xs.n", &format!("{key}{suffix}"))],
+                    &fl(num(&n[field], d)),
+                );
+            }
+        }
+        xml.end("CPhysicsSettingsSource");
+    }
+    xml.end("carray_list");
+    match first_uuid {
+        Some(u) => xml.empty(
+            "CPhysicsSettingsGuid",
+            &[
+                attr("xs.n", "selectedCubismPhysics"),
+                attr("uuid", &u),
+                attr("note", "(no debug info)"),
+            ],
+        ),
+        None => xml.empty("null", &[attr("xs.n", "selectedCubismPhysics")]),
+    }
+    match physics.and_then(|p| p.meta()["Fps"].as_i64()) {
+        Some(f) if f > 0 => xml.text("i", &[attr("xs.n", "settingFPS")], &f.to_string()),
+        _ => xml.empty("null", &[attr("xs.n", "settingFPS")]),
+    }
     xml.end("CPhysicsSettingsSourceSet");
+}
+
+fn write_vec2(xml: &mut XmlWriter, name: &str, x: f32, y: f32) {
+    xml.start("GVector2", &[attr("xs.n", name)]);
+    xml.text("f", &[attr("xs.n", "x")], &fl(x));
+    xml.text("f", &[attr("xs.n", "y")], &fl(y));
+    xml.end("GVector2");
+}
+
+fn fl(value: f32) -> String {
+    let s = float(value);
+    if s.contains('.') || s.contains('e') { s } else { format!("{s}.0") }
 }
 
 fn write_game_motion_set(xml: &mut XmlWriter) {
@@ -260,7 +453,18 @@ fn write_parameters(xml: &mut XmlWriter, plan: &ProjectPlan, model: &Moc3Model) 
             attr("count", model.parameters().len()),
         ],
     );
-    for (parameter, parameter_plan) in model.parameters().iter().zip(&plan.parameters) {
+    let ids: Vec<&str> = model.parameters().iter().map(|p| p.id()).collect();
+    let guess = crate::decompiler::GUESS_PAIRS.load(std::sync::atomic::Ordering::Relaxed);
+    let is_pair = |a: &str, b: &str| {
+        matches!(
+            (a, b),
+            ("ParamAngleX", "ParamAngleY")
+                | ("ParamEyeBallX", "ParamEyeBallY")
+                | ("ParamMouthForm", "ParamMouthOpenY")
+        ) || (guess && matches!((a.strip_suffix('X'), b.strip_suffix('Y')), (Some(x), Some(y)) if x == y))
+    };
+    for (index, (parameter, parameter_plan)) in model.parameters().iter().zip(&plan.parameters).enumerate() {
+        let combined = ids.get(index + 1).is_some_and(|next| is_pair(ids[index], next));
         xml.start("CParameterSource", &[]);
         xml.text("i", &[attr("xs.n", "decimalPlaces")], "3");
         reference(xml, "CParameterGuid", "guid", parameter_plan.guid);
@@ -290,7 +494,7 @@ fn write_parameters(xml: &mut XmlWriter, plan: &ProjectPlan, model: &Moc3Model) 
             .map_or(parameter.id(), String::as_str);
         xml.text("s", &[attr("xs.n", "name")], display_name);
         xml.empty("s", &[attr("xs.n", "description")]);
-        xml.text("b", &[attr("xs.n", "combined")], "false");
+        xml.text("b", &[attr("xs.n", "combined")], if combined { "true" } else { "false" });
         let group_guid = plan
             .names
             .parameter_group_of

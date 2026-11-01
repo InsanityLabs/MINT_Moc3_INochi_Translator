@@ -33,6 +33,7 @@ struct Opts {
     inochi: bool,
     all_layers: bool,
     cmo3_visible: bool,
+    guess_pairs: bool,
     out_dir: PathBuf,
 }
 
@@ -126,6 +127,23 @@ fn analyze(path: &Path) -> Result<Loaded, String> {
         let names: Vec<&str> = arms.iter().map(|s| s.as_str()).collect();
         warn(Level::Info, format!("Alternate parts hidden by default (pose): {}", names.join(", ")));
     }
+    let unbound: Vec<&str> = moc
+        .parameters
+        .iter()
+        .filter(|p| p.binding_sources_count <= 0 && !p.id.to_lowercase().starts_with("divider"))
+        .map(|p| p.id.as_str())
+        .collect();
+    if !unbound.is_empty() {
+        let phys: std::collections::HashSet<String> = fs::read(path.with_extension("physics3.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .map(|v| {
+                v["PhysicsSettings"].as_array().into_iter().flatten().flat_map(|s| s["Output"].as_array().cloned().unwrap_or_default()).filter_map(|o| o["Destination"]["Id"].as_str().map(String::from)).collect()
+            })
+            .unwrap_or_default();
+        let by_physics = unbound.iter().filter(|u| phys.contains(**u)).count();
+        warn(Level::Info, format!("{} parameter(s) have no keyforms in the model and move nothing ({} of them are physics outputs). This is how the source file is built.", unbound.len(), by_physics));
+    }
     if moc.version >= 6 {
         warn(Level::Info, "Cubism 5.3 (v6) model: blend modes and offscreen drawing are approximated.".into());
     }
@@ -134,6 +152,7 @@ fn analyze(path: &Path) -> Result<Loaded, String> {
     }
 
     let mut model = Model::new(&moc);
+    model.hide_default_hidden(path);
     let mut preview = mint_core::render::render(&mut model, &textures);
     let (w, h) = preview.dimensions();
     let m = w.max(h);
@@ -159,6 +178,7 @@ fn export(path: &Path, o: &Opts, log: &Arc<Mutex<Vec<String>>>) -> Result<(), St
     let e = |x: std::io::Error| x.to_string();
     let name = path.file_stem().unwrap().to_string_lossy().to_string();
     fs::create_dir_all(&o.out_dir).map_err(e)?;
+    mint_core::set_guess_pairs(o.guess_pairs);
     let stem = o.out_dir.join(&name);
     let data = fs::read(path).map_err(e)?;
     let moc = Moc3::parse(&data).map_err(|x| x.to_string())?;
@@ -167,8 +187,10 @@ fn export(path: &Path, o: &Opts, log: &Arc<Mutex<Vec<String>>>) -> Result<(), St
     if o.psd || o.ora {
         say("Building layers...".into());
         let mut m = Model::new(&moc);
+        m.hide_default_hidden(path);
         let merged = mint_core::render::render(&mut m, &textures);
         let mut m2 = Model::new(&moc);
+        m2.hide_default_hidden(path);
         let (root, w, h) = mint_core::emit::build_layers(&mut m2, &textures, o.all_layers);
         if o.ora {
             let p = stem.with_extension("ora");
@@ -242,7 +264,7 @@ impl Default for App {
             loaded: None,
             texture: None,
             zoom: None,
-            opts: Opts { psd: true, ora: true, cmo3: true, inochi: true, all_layers: true, cmo3_visible: false, out_dir: PathBuf::new() },
+            opts: Opts { psd: true, ora: true, cmo3: true, inochi: true, all_layers: true, cmo3_visible: false, guess_pairs: false, out_dir: PathBuf::new() },
             loading: Arc::new(Mutex::new(None)),
             is_loading: false,
             busy: Arc::new(AtomicBool::new(false)),
@@ -389,6 +411,8 @@ impl eframe::App for App {
                     .on_hover_text("PSD and ORA: show every mesh, even ones invisible at the default pose.");
                 ui.checkbox(&mut self.opts.cmo3_visible, "Force everything visible in .cmo3")
                     .on_hover_text("Breaks hair/clothing toggles. Leave off unless you only want to see all art.");
+                ui.checkbox(&mut self.opts.guess_pairs, "Guess extra 2D parameter pairs")
+                    .on_hover_text("Also combine other X/Y parameter pairs (brows, body angle...) by name. Usually right, but the moc3 doesn't record it, so it can be wrong. Off = only Cubism's standard pairs.");
                 ui.add_space(4.0);
                 ui.label(RichText::new("Output folder").weak());
                 ui.label(self.opts.out_dir.display().to_string());

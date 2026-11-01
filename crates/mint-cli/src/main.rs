@@ -95,6 +95,9 @@ fn main() -> std::io::Result<()> {
         }
         return Ok(());
     }
+    if args.iter().any(|a| a == "--guess-pairs") {
+        mint_core::set_guess_pairs(true);
+    }
     if cmd == "cmo3dump" {
         let archive = moc2cmo::caff::decode_archive(&fs::read(&path)?).expect("not a readable cmo3");
         let out_dir = args.get(3).map(PathBuf::from);
@@ -221,6 +224,7 @@ fn main() -> std::io::Result<()> {
             let textures = load_textures(&path);
             eprintln!("textures: {}", textures.len());
             let mut model = Model::new(&moc);
+            model.hide_default_hidden(&path);
             let img = mint_core::render::render(&mut model, &textures);
             img.save(&out).expect("save png");
             println!("wrote {}", out.display());
@@ -232,8 +236,10 @@ fn main() -> std::io::Result<()> {
             let export_all = args.get(4).map(|s| s == "--all").unwrap_or(false);
             let textures = load_textures(&path);
             let mut model = Model::new(&moc);
+            model.hide_default_hidden(&path);
             let merged = mint_core::render::render(&mut model, &textures);
             let mut model2 = Model::new(&moc);
+            model2.hide_default_hidden(&path);
             let (root, w, h) = mint_core::emit::build_layers(&mut model2, &textures, export_all);
 
             let ora_path = stem.with_extension("ora");

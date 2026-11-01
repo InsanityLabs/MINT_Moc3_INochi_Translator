@@ -17,10 +17,16 @@ pub struct LayerImage {
     /// Indices of art meshes clipping this layer, if any.
     pub mask_sources: Vec<usize>,
     pub inverted_mask: bool,
+    /// Hidden at the default pose (zero opacity, pose-hidden or offscreen part).
+    pub visible: bool,
+    /// Clipping mask as an 8-bit layer mask matching `image` (255 = shown).
+    /// The art itself is exported unmasked so nothing is cut off.
+    pub mask: Option<image::GrayImage>,
 }
 
 pub struct LayerGroup {
     pub name: String,
+    pub visible: bool,
     /// Bottom-to-top order.
     pub children: Vec<LayerNode>,
 }
@@ -99,8 +105,11 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
             opacity: draw_opacity,
             blend: em.geom.blend,
             double_sided: em.geom.double_sided,
-            mask: em.geom.mask.clone(),
-            inverted_mask: em.geom.inverted_mask,
+            mask: None,
+            inverted_mask: false,
+            multiply: em.geom.multiply,
+            screen: em.geom.screen,
+            alpha_mode: crate::raster::AlphaMode::Over,
         };
         draw_mesh(&mut buf, tex, &geom);
         let bbox = alpha_bbox(&buf);
@@ -113,6 +122,13 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
         let cropped = image::imageops::crop_imm(&buf, x0, y0, x1 - x0, y1 - y0).to_image();
         let begin = am.mask_begin.max(0) as usize;
         let end = (begin + am.mask_count.max(0) as usize).min(moc.drawable_masks.len());
+        let mask = em.geom.mask.as_ref().map(|m| {
+            let inv = em.geom.inverted_mask;
+            image::GrayImage::from_fn(x1 - x0, y1 - y0, |x, y| {
+                let a = m.get_pixel(x0 + x, y0 + y).0[3];
+                image::Luma([if inv { 255 - a } else { a }])
+            })
+        });
         layer_of[em.index] = Some(LayerImage {
             name: if am.id.is_empty() { format!("ArtMesh{}", em.index) } else { am.id.clone() },
             mesh_idx: em.index,
@@ -126,6 +142,8 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
                 .map(|&m| m.max(0) as usize)
                 .collect(),
             inverted_mask: am.inverted_mask,
+            visible: em.geom.opacity > 0.001 && model.out_ancestor(em.index).is_none(),
+            mask,
         });
     }
     eprintln!("exported {} layers, skipped {} empty meshes", layer_of.iter().filter(|x| x.is_some()).count(), skipped_empty);
@@ -153,6 +171,7 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
         }
     }
 
+    let hidden: Vec<bool> = (0..moc.parts.len()).map(|p| model.part_hidden(p) || moc.offscreen_out_parts.get(p).copied().unwrap_or(false)).collect();
     fn subtree(
         p: usize,
         part_children: &[Vec<usize>],
@@ -160,10 +179,11 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
         render_pos: &[usize],
         layer_of: &mut [Option<LayerImage>],
         moc: &crate::moc3::Moc3,
+        hidden: &[bool],
     ) -> Option<LayerNode> {
         let mut subpart_nodes: Vec<LayerNode> = Vec::new();
         for &sp in &part_children[p] {
-            if let Some(n) = subtree(sp, part_children, mesh_children, render_pos, layer_of, moc) {
+            if let Some(n) = subtree(sp, part_children, mesh_children, render_pos, layer_of, moc, hidden) {
                 subpart_nodes.push(n);
             }
         }
@@ -182,13 +202,14 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
         items.sort_by_key(|n| n.min_render_pos(render_pos));
         Some(LayerNode::Group(LayerGroup {
             name: moc.parts[p].id.clone(),
+            visible: !hidden[p],
             children: items,
         }))
     }
 
     let mut items: Vec<LayerNode> = Vec::new();
     for &rp in &root_parts {
-        if let Some(n) = subtree(rp, &part_children, &mesh_children, &render_pos, &mut layer_of, moc)
+        if let Some(n) = subtree(rp, &part_children, &mesh_children, &render_pos, &mut layer_of, moc, &hidden)
         {
             items.push(n);
         }
@@ -201,6 +222,7 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
     (
         LayerGroup {
             name: "root".into(),
+            visible: true,
             children: items,
         },
         size.0,
@@ -243,6 +265,7 @@ fn configured_decompiler(
 ) -> moc2cmo::Decompiler {
     let mut dec = moc2cmo::Decompiler::new();
     dec.set_force_visible(force_visible);
+    dec.set_guess_pairs(crate::guess_pairs());
     let mut ranks = vec![0i32; moc.art_meshes.len()];
     for (pos, m) in model.render_order().into_iter().enumerate() {
         ranks[m] = pos as i32;
@@ -280,6 +303,7 @@ pub fn hidden_parts(moc: &crate::moc3::Moc3, moc_path: Option<&std::path::Path>)
         .filter(|(_, o)| **o)
         .map(|(p, _)| p.id.clone())
         .collect();
+    hidden.extend(moc.parts.iter().zip(&moc.part_offscreen_opacity).filter(|(_, o)| **o <= 0.0).map(|(p, _)| p.id.clone()));
     let pose = moc_path.and_then(|p| std::fs::read(p.with_extension("pose3.json")).ok())
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
     if let Some(groups) = pose.as_ref().and_then(|p| p["Groups"].as_array()) {
@@ -383,6 +407,7 @@ pub fn cmo3_project(moc: &crate::moc3::Moc3, moc3_data: &[u8], pngs: &[Vec<u8>],
     }
     dec.set_textures(tex);
     dec.set_force_visible(force_visible);
+    dec.set_guess_pairs(crate::guess_pairs());
     let mut ranks = vec![0i32; moc.art_meshes.len()];
     for (pos, m) in crate::model::Model::new(moc).render_order().into_iter().enumerate() {
         ranks[m] = pos as i32;

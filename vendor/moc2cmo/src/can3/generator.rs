@@ -56,7 +56,7 @@ pub(crate) fn generate(
         ids += 1;
         scene_refs.push((scene, scene_guid));
         write_group_track(&mut xml, group, scene, root_track_guid, track_guid);
-        write_scene(&mut xml, scene, scene_guid, group, track, motion, name);
+        write_scene(&mut xml, scene, scene_guid, group, track, motion, name, input.canvas, &input.tag);
         write_model_track(
             &mut xml,
             TrackIds {
@@ -156,6 +156,10 @@ pub struct MotionInstance {
     pub fade_in_time: Option<f32>,
     /// Optional fade-out duration in seconds.
     pub fade_out_time: Option<f32>,
+    /// Model canvas size in pixels, used as the scene canvas.
+    pub canvas: Option<(u32, u32)>,
+    /// Free-form scene tag (e.g. the motion group).
+    pub tag: String,
 }
 
 #[derive(Copy, Clone)]
@@ -279,6 +283,8 @@ fn write_scene(
     track: u32,
     motion: &Motion3,
     name: &str,
+    canvas: Option<(u32, u32)>,
+    tag: &str,
 ) {
     let frames = (motion.meta().duration() * motion.meta().fps())
         .ceil()
@@ -287,12 +293,16 @@ fn write_scene(
     xml.start("CSceneSource", &[attr("xs.id", ref_id(scene))]);
     xml.text("s", &[attr("xs.n", "sceneName")], name);
     xml.start("CImageCanvas", &[attr("xs.n", "canvas")]);
-    xml.text("i", &[attr("xs.n", "pixelWidth")], 320);
-    xml.text("i", &[attr("xs.n", "pixelHeight")], 240);
+    xml.text("i", &[attr("xs.n", "pixelWidth")], canvas.map_or(320, |c| c.0));
+    xml.text("i", &[attr("xs.n", "pixelHeight")], canvas.map_or(240, |c| c.1));
     xml.empty("CColor", &[attr("xs.n", "background")]);
     xml.end("CImageCanvas");
     reference(&mut xml, "CSceneGuid", "guid", scene_guid);
-    xml.empty("s", &[attr("xs.n", "tag")]);
+    if tag.is_empty() {
+        xml.empty("s", &[attr("xs.n", "tag")]);
+    } else {
+        xml.text("s", &[attr("xs.n", "tag")], tag);
+    }
     xml.start("CTrackSourceSet", &[attr("xs.n", "trackSourceSet")]);
     xml.start("carray_list", &[attr("xs.n", "_sources"), attr("count", 2)]);
     xml.empty("CMvTrack_Group_Source", &[attr("xs.ref", ref_id(group))]);

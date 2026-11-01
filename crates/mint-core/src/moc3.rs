@@ -152,6 +152,9 @@ pub struct ArtMesh {
     pub position_index_count: i32,
     pub mask_begin: i32,
     pub mask_count: i32,
+    /// Cubism 5.3 (v6) blend value: low byte colour blend, next byte alpha
+    /// blend. -1 for older files (use `blend_mode` flags instead).
+    pub blend_v6: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +237,17 @@ pub struct DrawOrderGroupObject {
 #[derive(Debug)]
 pub struct Moc3 {
     pub version: u8,
+    /// Parts that own an offscreen buffer (v6).
+    pub part_offscreen: Vec<bool>,
+    /// Offscreen composite blend value per part (colour byte | alpha byte << 8).
+    pub part_offscreen_blend: Vec<i32>,
+    /// Per art mesh: index of its first keyform colour (v3+), or -1.
+    pub mesh_color_begin: Vec<i32>,
+    /// Keyform multiply / screen colours (v3+); empty when absent.
+    pub multiply_colors: Vec<[f32; 3]>,
+    pub screen_colors: Vec<[f32; 3]>,
+    /// Per-part offscreen opacity (v6); 1.0 when the part has no offscreen.
+    pub part_offscreen_opacity: Vec<f32>,
     /// Parts (v6 / Cubism 5.3) drawn through an offscreen buffer with the
     /// "Out" alpha blend: only visible where nothing is behind them.
     pub offscreen_out_parts: Vec<bool>,
@@ -523,7 +537,7 @@ impl Moc3 {
         };
 
         // ---- Art meshes: [rt0..3, ids, kbs, ksb, ksc, vis, en, pp, pd, tex, flags, vc, uvb, pib, pic, mb, mc] ----
-        let art_meshes = {
+        let mut art_meshes = {
             let n = cnt.art_meshes;
             t.skip(4);
             let ids = r.ids(t.ptr()?, n)?;
@@ -562,6 +576,7 @@ impl Moc3 {
                     position_index_count: pic[i],
                     mask_begin: mb[i],
                     mask_count: mc[i],
+                    blend_v6: -1,
                 })
                 .collect::<Vec<_>>()
         };
@@ -711,17 +726,75 @@ impl Moc3 {
             .collect();
 
         // ---- Drawable masks ----
-        let drawable_masks = r.i32s(t.ptr()?, cnt.drawable_masks)?;
+        let mut drawable_masks = r.i32s(t.ptr()?, cnt.drawable_masks)?;
         let mut offscreen_out_parts = vec![false; cnt.parts];
+        let mut mesh_color_begin = vec![-1i32; cnt.art_meshes];
+        let (mut multiply_colors, mut screen_colors): (Vec<[f32; 3]>, Vec<[f32; 3]>) = (Vec::new(), Vec::new());
+        if version >= 3 {
+            let slot = |s: usize| r.u32_at(0x40 + s * 4).map(|v| v as usize).unwrap_or(0);
+            let nm = r.u32_at(count_info + 23 * 4).map(|v| v as usize).unwrap_or(0);
+            let ns = r.u32_at(count_info + 24 * 4).map(|v| v as usize).unwrap_or(0);
+            let read3 = |s: [usize; 3], n: usize| -> Option<Vec<[f32; 3]>> {
+                if n == 0 || n > 10_000_000 || s.iter().any(|&x| slot(x) == 0) {
+                    return None;
+                }
+                let (a, b, c) = (r.f32s(slot(s[0]), n).ok()?, r.f32s(slot(s[1]), n).ok()?, r.f32s(slot(s[2]), n).ok()?);
+                Some((0..n).map(|i| [a[i], b[i], c[i]]).collect())
+            };
+            if slot(107) != 0 {
+                if let Ok(v) = r.i32s(slot(107), cnt.art_meshes) {
+                    mesh_color_begin = v;
+                }
+            }
+            multiply_colors = read3([108, 109, 110], nm).unwrap_or_default();
+            screen_colors = read3([111, 112, 113], ns).unwrap_or_default();
+        }
+        let mut part_offscreen = vec![false; cnt.parts];
+        let mut part_offscreen_blend = vec![0i32; cnt.parts];
+        if version >= 6 {
+            if let Ok(s) = r.u32_at(0x40 + 153 * 4) {
+                if s != 0 {
+                    if let Ok(v) = r.i32s(s as usize, cnt.art_meshes) {
+                        for (am, b) in art_meshes.iter_mut().zip(v) {
+                            am.blend_v6 = b;
+                        }
+                    }
+                }
+            }
+        }
+        let mut part_offscreen_opacity = vec![1.0f32; cnt.parts];
+        let mut offscreen_masks: Vec<Vec<i32>> = vec![Vec::new(); cnt.parts];
         if version >= 6 {
             let slot = |s: usize| r.u32_at(0x40 + s * 4).map(|v| v as usize);
             if let (Ok(pi), Ok(bl)) = (slot(149), slot(157)) {
                 if let Ok(idx) = r.i32s(pi, cnt.parts) {
                     let n = idx.iter().copied().max().unwrap_or(-1) + 1;
+                    if let (Ok(b), Ok(k)) = (slot(158), slot(159)) {
+                        let n = n.max(0) as usize;
+                        if let (Ok(begins), Ok(cnts)) = (r.i32s(b, n), r.i32s(k, n)) {
+                            for (p, &o) in idx.iter().enumerate() {
+                                if o >= 0 {
+                                    let (b, c) = (begins[o as usize].max(0) as usize, cnts[o as usize].max(0) as usize);
+                                    offscreen_masks[p] = drawable_masks.iter().skip(b).take(c).copied().collect();
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(opac) = slot(161).and_then(|o| r.f32s(o, n.max(0) as usize)) {
+                        for (p, &o) in idx.iter().enumerate() {
+                            if o >= 0 {
+                                part_offscreen_opacity[p] = opac[o as usize];
+                            }
+                        }
+                    }
                     if let Ok(blend) = r.i32s(bl, n.max(0) as usize) {
                         for (p, &o) in idx.iter().enumerate() {
-                            if o >= 0 && (blend[o as usize] >> 8) & 0xFF == 2 {
-                                offscreen_out_parts[p] = true;
+                            if o >= 0 {
+                                part_offscreen[p] = true;
+                                part_offscreen_blend[p] = blend[o as usize];
+                                if (blend[o as usize] >> 8) & 0xFF == 2 {
+                                    offscreen_out_parts[p] = true;
+                                }
                             }
                         }
                     }
@@ -767,6 +840,29 @@ impl Moc3 {
                 .collect::<Vec<_>>()
         };
 
+        // Offscreen masks (v6) apply to every mesh inside the part.
+        if offscreen_masks.iter().any(|m| !m.is_empty()) {
+            for am in art_meshes.iter_mut() {
+                let b = am.mask_begin.max(0) as usize;
+                let mut list: Vec<i32> = drawable_masks.iter().skip(b).take(am.mask_count.max(0) as usize).copied().collect();
+                let (mut part, mut guard) = (am.parent_part, 0);
+                while part >= 0 && (part as usize) < parts.len() && guard < 64 {
+                    for &m in &offscreen_masks[part as usize] {
+                        if !list.contains(&m) {
+                            list.push(m);
+                        }
+                    }
+                    part = parts[part as usize].parent_part;
+                    guard += 1;
+                }
+                if list.len() as i32 != am.mask_count {
+                    am.mask_begin = drawable_masks.len() as i32;
+                    am.mask_count = list.len() as i32;
+                    drawable_masks.extend(list);
+                }
+            }
+        }
+
         // ---- Glue sections: skip (9 + 2 + 1 pointers) ----
         t.skip(9);
         t.skip(2);
@@ -804,6 +900,12 @@ impl Moc3 {
             draw_order_group_objects,
             warp_deformer_quad_source,
             offscreen_out_parts,
+            part_offscreen,
+            part_offscreen_blend,
+            part_offscreen_opacity,
+            mesh_color_begin,
+            multiply_colors,
+            screen_colors,
         })
     }
 }
