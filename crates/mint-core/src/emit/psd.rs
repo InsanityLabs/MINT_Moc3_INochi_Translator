@@ -93,12 +93,70 @@ fn flatten<'a>(group: &'a LayerGroup, out: &mut Vec<Rec<'a>>) {
     }
 }
 
+/// Switches for how the PSD is written. The defaults are what ships; the others
+/// exist to bisect what a picky reader (Clip Studio Paint) objects to.
+#[derive(Clone, Copy, Debug)]
+pub struct PsdOptions {
+    /// Pad every channel block (incl. layer masks) to an even length. Off by
+    /// default: Photoshop does not, and Clip Studio Paint desyncs if it is on.
+    pub pad_channels: bool,
+    /// Store channels uncompressed instead of RLE.
+    pub raw_channels: bool,
+    /// Photoshop's extra per-layer tagged blocks (ids, flags, ...), beyond the name.
+    pub extra_tags: bool,
+    /// Image resources section (resolution, group info).
+    pub resources: bool,
+    /// Group records carry 4 empty channels (as Photoshop writes them).
+    pub group_channels: bool,
+    /// No groups at all: every layer at the top level.
+    pub flat: bool,
+    /// Simple layer flags (0) instead of Photoshop's 8 / 24.
+    pub plain_flags: bool,
+    /// Uncompressed merged composite.
+    pub raw_composite: bool,
+    /// 4-byte section-divider block for the closing divider (Photoshop style).
+    pub divider_short_lsct: bool,
+    /// Write layer masks.
+    pub masks: bool,
+    /// Write the "hidden" flag for layers and groups.
+    pub hidden_flags: bool,
+}
+
+impl Default for PsdOptions {
+    fn default() -> Self {
+        PsdOptions {
+            pad_channels: false,
+            raw_channels: false,
+            extra_tags: true,
+            resources: true,
+            group_channels: true,
+            flat: false,
+            plain_flags: false,
+            raw_composite: false,
+            divider_short_lsct: true,
+            masks: true,
+            hidden_flags: true,
+        }
+    }
+}
+
 pub fn write_psd<W: Write>(
     root: &LayerGroup,
     merged: &RgbaImage,
     w: u32,
     h: u32,
+    out: W,
+) -> std::io::Result<()> {
+    write_psd_opts(root, merged, w, h, out, PsdOptions::default())
+}
+
+pub fn write_psd_opts<W: Write>(
+    root: &LayerGroup,
+    merged: &RgbaImage,
+    w: u32,
+    h: u32,
     mut out: W,
+    opt: PsdOptions,
 ) -> std::io::Result<()> {
     // ---- build flat record list ----
     // File order: layers stored topmost-first. For a group:
@@ -110,7 +168,7 @@ pub fn write_psd<W: Write>(
     //   [folder record][children top-first][bounding divider].
     // We flatten bottom-to-top internally, so emit accordingly.
     let mut recs: Vec<Rec> = Vec::new();
-    fn walk<'a>(group: &'a LayerGroup, out: &mut Vec<Rec<'a>>) -> (i32, i32, i32, i32) {
+    fn walk<'a>(group: &'a LayerGroup, out: &mut Vec<Rec<'a>>, flat: bool) -> (i32, i32, i32, i32) {
         // Returns bounding box (left, top, right, bottom) of this group
         let mut bbox = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         // PSD stores layer records bottom-most first — our children are
@@ -129,13 +187,17 @@ pub fn write_psd<W: Write>(
                     //   [bounding divider (type=3)]
                     //   [children, top-first]
                     //   [folder record (type=1 open)]
-                    out.push(Rec::Group("</Layer group>", false, (0, 0, 0, 0), true));
-                    let child_bbox = walk(g, out);
+                    if !flat {
+                        out.push(Rec::Group("</Layer group>", false, (0, 0, 0, 0), true));
+                    }
+                    let child_bbox = walk(g, out, flat);
                     bbox.0 = bbox.0.min(child_bbox.0);
                     bbox.1 = bbox.1.min(child_bbox.1);
                     bbox.2 = bbox.2.max(child_bbox.2);
                     bbox.3 = bbox.3.max(child_bbox.3);
-                    out.push(Rec::Group(&g.name, true, child_bbox, g.visible));
+                    if !flat {
+                        out.push(Rec::Group(&g.name, true, child_bbox, g.visible));
+                    }
                 }
             }
         }
@@ -147,7 +209,7 @@ pub fn write_psd<W: Write>(
         }
     }
     let _ = flatten;
-    let _root_bbox = walk(root, &mut recs);
+    let _root_bbox = walk(root, &mut recs, opt.flat);
 
     // ---- header ----
     out.write_all(b"8BPS")?;
@@ -174,11 +236,16 @@ pub fn write_psd<W: Write>(
         }
     };
     // 1005 ResolutionInfo: 72 dpi
+    if opt.resources {
     resource(1005, &[0x00, 0x48, 0, 0, 0, 1, 0, 1, 0x00, 0x48, 0, 0, 0, 1, 0, 1]);
     // 1024 layer state (active layer), 1026 layer group ids, 1072 group-enabled flags
     resource(1024, &0u16.to_be_bytes());
     resource(1026, &vec![0u8; n_recs * 2]);
     resource(1072, &vec![1u8; n_recs]);
+    }
+    if !opt.resources {
+        res.clear();
+    }
     out.write_all(&(res.len() as u32).to_be_bytes())?;
     out.write_all(&res)?;
 
@@ -190,10 +257,10 @@ pub fn write_psd<W: Write>(
         let layer_id = rec_idx as u32 + 2;
         match rec {
             Rec::Group(..) => {
-                write_group_record(rec, &mut rec_bytes, &mut chan_bytes, layer_id)?;
+                write_group_record(rec, &mut rec_bytes, &mut chan_bytes, layer_id, &opt)?;
             }
             Rec::Image(li) => {
-                write_image_record(li, &mut rec_bytes, &mut chan_bytes, layer_id)?;
+                write_image_record(li, &mut rec_bytes, &mut chan_bytes, layer_id, &opt)?;
             }
         }
     }
@@ -202,8 +269,8 @@ pub fn write_psd<W: Write>(
     layer_info.extend_from_slice(&(-n_layers).to_be_bytes()); // neg = alpha is transparency
     layer_info.extend_from_slice(&rec_bytes);
     layer_info.extend_from_slice(&chan_bytes);
-    // pad to even
-    while layer_info.len() % 2 != 0 {
+    // pad to a multiple of 4 (Photoshop does; the spec only asks for even)
+    while layer_info.len() % 4 != 0 {
         layer_info.push(0);
     }
 
@@ -221,8 +288,17 @@ pub fn write_psd<W: Write>(
 
     // ---- composite image (merged) ----
     // Spec: all row byte-counts for ALL channels first, then all pixel data.
-    out.write_all(&1u16.to_be_bytes())?; // RLE
     let (mw, mh) = (merged.width() as usize, merged.height() as usize);
+    if opt.raw_composite {
+        out.write_all(&0u16.to_be_bytes())?;
+        let raw = merged.as_raw();
+        for ch in 0..4 {
+            let plane: Vec<u8> = raw.chunks_exact(4).map(|px| px[ch]).collect();
+            out.write_all(&plane)?;
+        }
+        return Ok(());
+    }
+    out.write_all(&1u16.to_be_bytes())?; // RLE
     let raw = merged.as_raw();
     let mut all_lens = Vec::with_capacity(4 * mh);
     let mut all_data = Vec::new();
@@ -299,7 +375,7 @@ fn lsct(kind: u32, extra: &mut Vec<u8>) {
     tagged(b"lsct", &body, extra);
 }
 
-fn write_group_record(rec: &Rec<'_>, out: &mut Vec<u8>, chan: &mut Vec<u8>, layer_id: u32) -> std::io::Result<()> {
+fn write_group_record(rec: &Rec<'_>, out: &mut Vec<u8>, chan: &mut Vec<u8>, layer_id: u32, opt: &PsdOptions) -> std::io::Result<()> {
     let (name, kind, bbox, visible) = match rec {
         Rec::Group(n, is_open, bbox, vis) => (*n, if *is_open { 1u32 } else { 3u32 }, *bbox, *vis),
         _ => unreachable!(),
@@ -311,25 +387,38 @@ fn write_group_record(rec: &Rec<'_>, out: &mut Vec<u8>, chan: &mut Vec<u8>, laye
     }
     // Photoshop gives group records 4 empty channels (just the 2-byte
     // compression marker each).
-    out.write_all(&4u16.to_be_bytes())?;
-    for id in [-1i16, 0, 1, 2] {
-        out.write_all(&id.to_be_bytes())?;
-        out.write_all(&2u32.to_be_bytes())?;
-        chan.extend_from_slice(&0u16.to_be_bytes());
+    if opt.group_channels {
+        out.write_all(&4u16.to_be_bytes())?;
+        for id in [-1i16, 0, 1, 2] {
+            out.write_all(&id.to_be_bytes())?;
+            out.write_all(&2u32.to_be_bytes())?;
+            chan.extend_from_slice(&0u16.to_be_bytes());
+        }
+    } else {
+        out.write_all(&0u16.to_be_bytes())?;
     }
     out.write_all(b"8BIM")?;
     out.write_all(b"norm")?;
-    let flags = 0x18u8 | if visible { 0 } else { 0x02 };
+    let base = if opt.plain_flags { if kind == 3 { 0x08u8 } else { 0 } } else { 0x18u8 };
+    let flags = base | if visible || !opt.hidden_flags { 0 } else { 0x02 };
     out.write_all(&[255u8, 0, flags, 0])?; // opacity, clipping, flags, filler
     let mut extra = Vec::new();
     extra.extend_from_slice(&0u32.to_be_bytes()); // mask data
     blending_ranges(&mut extra);
     pascal_name(name, &mut extra);
     luni(name, &mut extra);
-    tagged(b"lyid", &layer_id.to_be_bytes(), &mut extra);
-    lsct(kind, &mut extra);
-    tagged(b"lspf", &0u32.to_be_bytes(), &mut extra);
-    tagged(b"lclr", &[0u8; 8], &mut extra);
+    if opt.extra_tags {
+        tagged(b"lyid", &layer_id.to_be_bytes(), &mut extra);
+    }
+    if opt.divider_short_lsct && kind == 3 {
+        tagged(b"lsct", &kind.to_be_bytes(), &mut extra);
+    } else {
+        lsct(kind, &mut extra);
+    }
+    if opt.extra_tags {
+        tagged(b"lspf", &0u32.to_be_bytes(), &mut extra);
+        tagged(b"lclr", &[0u8; 8], &mut extra);
+    }
     out.write_all(&(extra.len() as u32).to_be_bytes())?;
     out.write_all(&extra)?;
     Ok(())
@@ -340,7 +429,9 @@ fn write_image_record(
     rec: &mut Vec<u8>,
     chan: &mut Vec<u8>,
     layer_id: u32,
+    opt: &PsdOptions,
 ) -> std::io::Result<()> {
+    let mask = if opt.masks { li.mask.as_ref() } else { None };
     let (lw, lh) = (li.image.width() as usize, li.image.height() as usize);
     let (top, left) = (li.top, li.left);
     let (bottom, right) = (top + lh as i32, left + lw as i32);
@@ -348,7 +439,7 @@ fn write_image_record(
         rec.write_all(&v.to_be_bytes())?;
     }
     // 4 channels: -1 alpha, 0 R, 1 G, 2 B (+ -2 user layer mask)
-    let n_chan = if li.mask.is_some() { 5usize } else { 4 };
+    let n_chan = if mask.is_some() { 5usize } else { 4 };
     rec.write_all(&(n_chan as u16).to_be_bytes())?;
     // reserve space for channel lengths
     let len_pos = rec.len();
@@ -356,7 +447,8 @@ fn write_image_record(
 
     rec.write_all(b"8BIM")?;
     rec.write_all(blend_key(li.blend))?;
-    rec.write_all(&[(li.opacity * 255.0) as u8, 0u8, 0x08 | if li.visible { 0u8 } else { 0x02 }, 0u8])?;
+    let base = if opt.plain_flags { 0u8 } else { 0x08 };
+    rec.write_all(&[(li.opacity * 255.0) as u8, 0u8, base | if li.visible || !opt.hidden_flags { 0u8 } else { 0x02 }, 0u8])?;
 
     // channel data first (to know lengths): de-interleave + RLE
     let raw = li.image.as_raw();
@@ -377,18 +469,24 @@ fn write_image_record(
     let mut blocks = Vec::with_capacity(5);
     for c in 0..4 {
         let mut b = Vec::with_capacity(2 + row_counts[c].len() * 2 + chan_data[c].len());
-        b.extend_from_slice(&1u16.to_be_bytes()); // RLE
-        for l in &row_counts[c] {
-            b.extend_from_slice(&l.to_be_bytes());
+        if opt.raw_channels {
+            b.extend_from_slice(&0u16.to_be_bytes()); // raw
+            let src = if c == 0 { 3 } else { c - 1 };
+            b.extend(raw.chunks_exact(4).map(|px| px[src]));
+        } else {
+            b.extend_from_slice(&1u16.to_be_bytes()); // RLE
+            for l in &row_counts[c] {
+                b.extend_from_slice(&l.to_be_bytes());
+            }
+            b.extend_from_slice(&chan_data[c]);
         }
-        b.extend_from_slice(&chan_data[c]);
         // pad channel data to even
-        while b.len() % 2 != 0 {
+        while opt.pad_channels && b.len() % 2 != 0 {
             b.push(0);
         }
         blocks.push(b);
     }
-    if let Some(m) = &li.mask {
+    if let Some(m) = mask {
         let (lens, data) = rle_channel(m.as_raw(), lw, lh);
         let mut b = Vec::with_capacity(2 + lens.len() * 2 + data.len());
         b.extend_from_slice(&1u16.to_be_bytes());
@@ -396,7 +494,7 @@ fn write_image_record(
             b.extend_from_slice(&l.to_be_bytes());
         }
         b.extend_from_slice(&data);
-        while b.len() % 2 != 0 {
+        while opt.pad_channels && b.len() % 2 != 0 {
             b.push(0);
         }
         blocks.push(b);
@@ -412,7 +510,7 @@ fn write_image_record(
 
     // extra data
     let mut extra = Vec::new();
-    if li.mask.is_some() {
+    if mask.is_some() {
         // layer mask data: rect (top,left,bottom,right), default colour, flags, padding
         extra.extend_from_slice(&20u32.to_be_bytes());
         for v in [top, left, bottom, right] {
@@ -425,12 +523,14 @@ fn write_image_record(
     blending_ranges(&mut extra);
     pascal_name(&li.name, &mut extra);
     luni(&li.name, &mut extra);
-    tagged(b"lyid", &layer_id.to_be_bytes(), &mut extra);
-    tagged(b"clbl", &[1, 0, 0, 0], &mut extra);
-    tagged(b"infx", &[0, 0, 0, 0], &mut extra);
-    tagged(b"knko", &[0, 0, 0, 0], &mut extra);
-    tagged(b"lspf", &0u32.to_be_bytes(), &mut extra);
-    tagged(b"lclr", &[0u8; 8], &mut extra);
+    if opt.extra_tags {
+        tagged(b"lyid", &layer_id.to_be_bytes(), &mut extra);
+        tagged(b"clbl", &[1, 0, 0, 0], &mut extra);
+        tagged(b"infx", &[0, 0, 0, 0], &mut extra);
+        tagged(b"knko", &[0, 0, 0, 0], &mut extra);
+        tagged(b"lspf", &0u32.to_be_bytes(), &mut extra);
+        tagged(b"lclr", &[0u8; 8], &mut extra);
+    }
     rec.write_all(&(extra.len() as u32).to_be_bytes())?;
     rec.write_all(&extra)?;
     Ok(())

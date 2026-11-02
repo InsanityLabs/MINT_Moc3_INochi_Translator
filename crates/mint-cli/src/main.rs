@@ -200,6 +200,41 @@ fn main() -> std::io::Result<()> {
                 println!("  mesh {mi} {} : {d:.1}px | tex {tw:.0}x{th:.0} | ours {:.0}x{:.0} | moc2cmo {:.0}x{:.0}", am.id, ext(&ours, 0), ext(&ours, 1), ext(&other[*mi], 0), ext(&other[*mi], 1));
             }
         }
+        "psdvariants" => {
+            use mint_core::emit::psd::{write_psd_opts, PsdOptions};
+            let outdir = PathBuf::from(args.get(3).expect("usage: mint-cli psdvariants <moc3> <outdir>"));
+            std::fs::create_dir_all(&outdir)?;
+            let textures = load_textures(&path);
+            let mut model = Model::new(&moc);
+            model.hide_default_hidden(&path);
+            let merged = mint_core::render::render(&mut model, &textures);
+            let mut model2 = Model::new(&moc);
+            model2.hide_default_hidden(&path);
+            let (root, w, h) = mint_core::emit::build_layers(&mut model2, &textures, true);
+            let d = PsdOptions::default();
+            let variants: Vec<(&str, PsdOptions)> = vec![
+                ("A_default", d),
+                ("B_divider_long_lsct", PsdOptions { divider_short_lsct: false, ..d }),
+                ("C_flat_no_groups", PsdOptions { flat: true, ..d }),
+                ("D_groups_no_channels", PsdOptions { group_channels: false, ..d }),
+                ("E_plain_flags", PsdOptions { plain_flags: true, ..d }),
+                ("F_no_extra_tags", PsdOptions { extra_tags: false, ..d }),
+                ("G_no_resources", PsdOptions { resources: false, ..d }),
+                ("H_no_masks", PsdOptions { masks: false, ..d }),
+                ("I_nothing_hidden", PsdOptions { hidden_flags: false, ..d }),
+                ("J_raw_channels", PsdOptions { raw_channels: true, ..d }),
+                ("K_with_channel_padding", PsdOptions { pad_channels: true, ..d }),
+                ("L_raw_composite", PsdOptions { raw_composite: true, ..d }),
+                ("M_minimal", PsdOptions { flat: true, masks: false, extra_tags: false, resources: false, plain_flags: true, hidden_flags: false, ..d }),
+            ];
+            let only = args.get(4).cloned().unwrap_or_default();
+            for (name, opt) in variants.into_iter().filter(|(n, _)| n.contains(only.as_str())) {
+                let p = outdir.join(format!("{name}.psd"));
+                let f = std::io::BufWriter::new(std::fs::File::create(&p)?);
+                write_psd_opts(&root, &merged, w, h, f, opt)?;
+                println!("wrote {}", p.display());
+            }
+        }
         "order" => {
             let mut model = Model::new(&moc);
             for (pos, m) in model.render_order().into_iter().enumerate() {
