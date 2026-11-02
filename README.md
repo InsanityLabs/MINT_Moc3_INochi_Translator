@@ -140,12 +140,14 @@ and the in-app updater downloads the matching one.
 | Nightly | daily 06:00 UTC if `main` changed, or run manually | a new pre-release per build (`nightly-<date>-<time>-<commit>`); the newest 10 are kept | users on the Nightly channel |
 | Stable | push a tag like `v1.2.0` | a normal release (`v1.2.0-rc1` = pre-release), kept forever | everyone on the Stable channel |
 
-Cut a stable release:
+Cut a stable release, either way:
 
-```
-git tag v1.2.0
-git push origin v1.2.0
-```
+- **From GitHub:** Actions -> **Release** -> **Run workflow**, type the tag
+  (e.g. `v1.2.0`), run. The tag is created on the branch you run it from. The same
+  works from a terminal: `gh workflow run release.yml -f tag=v1.2.0`.
+- **From git:** `git tag v1.2.0 && git push origin v1.2.0`.
+
+Tags must look like `v1.2.3` or `v1.2.3-rc1` (a suffix makes it a pre-release).
 
 The workflow stamps the version from the tag, builds every platform, packs a small zip per platform
 (`python scripts/package_release.py`, run it locally too), and creates the release with

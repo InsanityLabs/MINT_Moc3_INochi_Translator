@@ -1,16 +1,27 @@
 name: Release
 
-# Publishes a stable release when you push a version tag:
+# Publishes a stable release, either by pushing a version tag:
 #   git tag v1.2.0 && git push origin v1.2.0
+# or by running this workflow by hand (Actions -> Release -> Run workflow) and
+# typing the tag; the tag is then created on the branch you run it from.
 # Tags with a suffix (v1.2.0-rc1) become pre-releases and are skipped by the
 # stable update channel. Releases are never deleted automatically.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. v1.2.0 (add -rc1 etc. for a pre-release)"
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -24,6 +35,10 @@ jobs:
           - { os: macos-latest, target: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Check the tag
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Tag must look like v1.2.3 or v1.2.3-rc1, got '$TAG'"; exit 1; }
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -41,7 +56,7 @@ jobs:
       - name: Stamp the version from the tag
         shell: bash
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           for f in crates/*/Cargo.toml; do
             sed -i.bak "1,/^version = .*/s//version = \"$v\"/" "$f"
             rm -f "$f.bak"
@@ -73,14 +88,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           short=$(git rev-parse --short=7 HEAD)
           day=$(date -u +%Y-%m-%d)
           if [[ "$v" == *-* ]]; then kind="--prerelease"; else kind="--latest"; fi
           notes=(--generate-notes)
           if [[ -f RELEASE_NOTES.md ]]; then notes=(--notes-file RELEASE_NOTES.md); fi
+          if [[ "${{ github.event_name }}" == "push" ]]; then where="--verify-tag"; else where="--target $GITHUB_SHA"; fi
           ls -l dist
           # The in-app updater compares the LAST token of the title with its own commit.
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          gh release create "$TAG" dist/* \
             --title "MINT - $v - $day - $short" \
-            --verify-tag $kind "${notes[@]}"
+            $where $kind "${notes[@]}"
