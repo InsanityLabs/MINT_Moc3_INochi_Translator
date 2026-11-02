@@ -58,7 +58,7 @@ jobs:
         run: |
           v="${TAG#v}"
           for f in crates/*/Cargo.toml; do
-            sed -i.bak "1,/^version = .*/s//version = \"$v\"/" "$f"
+            sed -i.bak "1,/^version = /s/^version = .*/version = \"$v\"/" "$f"
             rm -f "$f.bak"
           done
       - name: Build
