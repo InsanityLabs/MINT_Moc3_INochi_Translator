@@ -1,8 +1,9 @@
 name: Nightly
 
-# Rolling pre-release called "nightly", rebuilt from main when there are new
-# commits. It is a pre-release, so GitHub's "latest release" (what stable users
-# of the in-app updater follow) never points at it.
+# One pre-release per build, tagged nightly-<date>-<time>-<commit>, with a zip
+# for every platform. The newest 10 are kept and older nightlies are deleted.
+# Stable releases (v* tags) are never touched. Pre-releases are skipped by
+# GitHub's "latest release", so stable users of the in-app updater never see them.
 
 on:
   schedule:
@@ -21,53 +22,106 @@ concurrency:
   group: nightly
   cancel-in-progress: false
 
+env:
+  KEEP: 10
+
 jobs:
-  nightly:
-    runs-on: windows-latest
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.gate.outputs.build }}
+      short: ${{ steps.gate.outputs.short }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
-
       - name: Anything new since the last nightly?
         id: gate
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           short=$(git rev-parse --short=7 HEAD)
           echo "short=$short" >> "$GITHUB_OUTPUT"
-          last=$(gh release view nightly --json name -q .name 2>/dev/null || true)
-          if [[ "$last" == *"$short" && "${{ inputs.force }}" != "true" ]]; then
-            echo "Nightly is already at $short, nothing to do."
+          if gh release list --limit 100 --json tagName -q '.[].tagName' | grep -q -- "^nightly-.*-$short$" \
+             && [[ "${{ inputs.force }}" != "true" ]]; then
+            echo "A nightly for $short already exists, nothing to do."
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
+  build:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.gate.outputs.build == 'true'
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-        if: steps.gate.outputs.build == 'true'
-
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --workspace --target ${{ matrix.target }}
       - name: Package
-        if: steps.gate.outputs.build == 'true'
-        shell: pwsh
-        run: ./scripts/package-release.ps1
+        run: python scripts/package_release.py --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
 
-      - name: Publish rolling nightly release
-        if: steps.gate.outputs.build == 'true'
-        shell: bash
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Publish nightly pre-release
         env:
           GH_TOKEN: ${{ github.token }}
-          SHORT: ${{ steps.gate.outputs.short }}
+          SHORT: ${{ needs.gate.outputs.short }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          date=$(date -u +%Y-%m-%d)
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly \
-            "dist/MINT-windows-x64-$SHORT.zip" "dist/MINT-windows-x64-$SHORT.zip.sha256" \
+          ls -l dist
+          stamp=$(date -u +%Y%m%d-%H%M)
+          day=$(date -u +%Y-%m-%d)
+          gh release create "nightly-$stamp-$SHORT" dist/* \
             --prerelease \
             --target "$GITHUB_SHA" \
-            --title "MINT Nightly - $date - $SHORT" \
-            --notes "Automatic build of commit $SHORT. May be unstable; use the Stable channel for tested releases."
+            --title "MINT Nightly - $day - $SHORT" \
+            --notes "Automatic build of commit $SHORT for Windows, Linux and macOS. May be unstable; use the Stable channel for tested releases."
+      - name: Keep only the newest nightlies
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Only pre-releases whose tag starts with "nightly-" are ever pruned.
+          old=$(gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            -q "[.[] | select(.isPrerelease and (.tagName | startswith(\"nightly-\")))] | sort_by(.createdAt) | reverse | .[$KEEP:] | .[].tagName")
+          for tag in $old; do
+            echo "Removing old nightly $tag"
+            gh release delete "$tag" --cleanup-tag --yes
+          done
+          # The single rolling "nightly" release from the first version of this workflow.
+          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true

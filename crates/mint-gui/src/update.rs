@@ -2,7 +2,7 @@
 //! running executables with the ones from the newest release.
 //!
 //! Releases are identified by the short commit hash at the end of the release
-//! name ("MINT - 1.1.1 - ... - 56a329"). Only `mint-gui.exe` (and `mint-cli.exe`
+//! name ("MINT - 1.1.1 - ... - 56a329"). Only `mint-gui` (and `mint-cli`
 //! if it sits next to it) are extracted, using HTTP range requests, so even a
 //! release zip that bundles a whole build folder is not downloaded in full.
 
@@ -15,6 +15,50 @@ pub const REPO: &str = "InsanityLabs/MINT_Moc3_INochi_Translator";
 pub const COMMIT: &str = env!("MINT_COMMIT");
 const COMMIT_TIME: &str = env!("MINT_COMMIT_TIME");
 const BLOCK: u64 = 1 << 20;
+
+/// "windows-x64", "linux-x64", "macos-arm64"... as used in release asset names.
+pub fn platform_tag() -> String {
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "macos",
+        _ => "linux",
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+fn gui_file() -> String {
+    format!("mint-gui{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn cli_file() -> String {
+    format!("mint-cli{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Does `head` look like a program for this OS (PE / ELF / Mach-O)?
+fn looks_like_program(head: &[u8]) -> bool {
+    match std::env::consts::OS {
+        "windows" => head.starts_with(b"MZ"),
+        "macos" => matches!(head.get(..4), Some([0xCF, 0xFA, 0xED, 0xFE]) | Some([0xCA, 0xFE, 0xBA, 0xBE]) | Some([0xFE, 0xED, 0xFA, 0xCF])),
+        _ => head.starts_with(b"\x7fELF"),
+    }
+}
+
+/// Pick this platform's zip. Releases made before multi-platform builds had a
+/// single untagged zip, which is Windows-only.
+fn pick_asset<'a>(assets: &'a [Value], tag: &str) -> Option<&'a Value> {
+    let zips = || assets.iter().filter(|a| a["name"].as_str().is_some_and(|n| n.to_lowercase().ends_with(".zip")));
+    zips()
+        .find(|a| a["name"].as_str().is_some_and(|n| n.to_lowercase().contains(tag)))
+        .or_else(|| {
+            let tagged = |a: &&Value| a["name"].as_str().is_some_and(|n| ["windows-", "linux-", "macos-"].iter().any(|t| n.to_lowercase().contains(t)));
+            (std::env::consts::OS == "windows").then(|| zips().filter(|a| !tagged(a)).min_by_key(|a| a["size"].as_u64().unwrap_or(u64::MAX))).flatten()
+        })
+}
 
 /// Which releases to follow: tagged releases, or the rolling `nightly` pre-release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -80,6 +124,15 @@ fn same_commit(a: &str, b: &str) -> bool {
     a.starts_with(&b) || b.starts_with(&a)
 }
 
+/// Newest nightly pre-release in a `releases` listing (GitHub returns newest first).
+fn pick_nightly(list: &Value) -> Option<&Value> {
+    list.as_array()?.iter().find(|r| {
+        r["prerelease"].as_bool() == Some(true)
+            && r["draft"].as_bool() != Some(true)
+            && r["tag_name"].as_str().is_some_and(|t| t.starts_with("nightly-"))
+    })
+}
+
 /// Is a newer release than this build published? `Ok(None)` = up to date.
 pub fn check(channel: Channel) -> Result<Option<Release>, String> {
     check_with(COMMIT, COMMIT_TIME.parse().unwrap_or(0), channel)
@@ -90,20 +143,19 @@ pub fn check_with(local_commit: &str, local_time: i64, channel: Channel) -> Resu
         return Ok(None);
     }
     // `latest` skips pre-releases, so nightly builds never reach stable users.
-    let endpoint = match channel {
-        Channel::Stable => "latest",
-        Channel::Nightly => "tags/nightly",
+    let base = format!("https://api.github.com/repos/{REPO}/releases");
+    let get = |url: &str| -> Result<Option<Value>, String> {
+        match agent().get(url).set("Accept", "application/vnd.github+json").call() {
+            Ok(r) => r.into_json().map(Some).map_err(|e| format!("bad update response: {e}")),
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => Err(format!("update check failed: {e}")),
+        }
     };
-    let resp = match agent()
-        .get(&format!("https://api.github.com/repos/{REPO}/releases/{endpoint}"))
-        .set("Accept", "application/vnd.github+json")
-        .call()
-    {
-        Ok(r) => r,
-        Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(e) => return Err(format!("update check failed: {e}")),
+    let found = match channel {
+        Channel::Stable => get(&format!("{base}/latest"))?,
+        Channel::Nightly => get(&format!("{base}?per_page=30"))?.and_then(|list| pick_nightly(&list).cloned()),
     };
-    let v: Value = resp.into_json().map_err(|e| format!("bad update response: {e}"))?;
+    let Some(v) = found else { return Ok(None) };
     let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
     let (name, tag) = (s("name"), s("tag_name"));
     let Some(commit) = release_commit(&name, &tag) else {
@@ -113,13 +165,9 @@ pub fn check_with(local_commit: &str, local_time: i64, channel: Channel) -> Resu
     if same_commit(local_commit, &commit) || published <= local_time {
         return Ok(None);
     }
-    let asset = v["assets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|a| a["name"].as_str().is_some_and(|n| n.to_lowercase().ends_with(".zip")))
-        .min_by_key(|a| a["size"].as_u64().unwrap_or(u64::MAX))
-        .ok_or("the newest release has no .zip file")?;
+    let assets = v["assets"].as_array().cloned().unwrap_or_default();
+    let tag = platform_tag();
+    let asset = pick_asset(&assets, &tag).ok_or_else(|| format!("the newest release has no build for {tag}"))?;
     Ok(Some(Release {
         name,
         commit,
@@ -234,8 +282,13 @@ fn extract(zip: &mut zip::ZipArchive<Remote>, file: &str, dest: &Path, progress:
         progress(done);
     }
     drop(out);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
+    }
     let head = std::fs::read(dest).map_err(|e| e.to_string())?;
-    if head.len() < 1_000_000 || &head[..2] != b"MZ" {
+    if head.len() < 1_000_000 || !looks_like_program(&head) {
         let _ = std::fs::remove_file(dest);
         return Err(format!("{file} in the release does not look like a valid program"));
     }
@@ -271,7 +324,7 @@ pub fn install(rel: &Release, target: &Path, progress: &dyn Fn(u64, u64)) -> Res
     let remote = Remote::open(agent(), &rel.asset_url, rel.asset_size)?;
     let mut zip = zip::ZipArchive::new(remote).map_err(|e| format!("cannot read the release archive: {e}"))?;
     let dir = target.parent().ok_or("no install folder")?;
-    let gui_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("mint-gui.exe").to_string();
+    let gui_name = target.file_name().and_then(|n| n.to_str()).unwrap_or(&gui_file()).to_string();
     let total = (0..zip.len())
         .filter_map(|i| zip.by_index_raw(i).ok().map(|e| (e.name().to_string(), e.size())))
         .filter(|(n, _)| n.rsplit('/').next() == Some(gui_name.as_str()) && !n.contains("/deps/"))
@@ -283,9 +336,9 @@ pub fn install(rel: &Release, target: &Path, progress: &dyn Fn(u64, u64)) -> Res
     if !extract(&mut zip, &gui_name, &gui_new, &|d| progress(d, total))? {
         return Err(format!("{gui_name} is not in the release archive"));
     }
-    let cli = dir.join("mint-cli.exe");
-    let cli_new = dir.join("mint-cli.exe.new");
-    let cli_updated = cli.exists() && extract(&mut zip, "mint-cli.exe", &cli_new, &|_| {}).unwrap_or(false);
+    let cli = dir.join(cli_file());
+    let cli_new = dir.join(format!("{}.new", cli_file()));
+    let cli_updated = cli.exists() && extract(&mut zip, &cli_file(), &cli_new, &|_| {}).unwrap_or(false);
     swap(target, &gui_new)?;
     if cli_updated {
         let _ = swap(&cli, &cli_new);
@@ -298,14 +351,19 @@ pub fn cleanup_old() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(old_path(&exe));
         if let Some(dir) = exe.parent() {
-            let _ = std::fs::remove_file(dir.join("mint-cli.exe.old"));
+            let _ = std::fs::remove_file(old_path(&dir.join(cli_file())));
         }
     }
 }
 
 fn settings_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("MINT").join("settings.json")
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let base = match std::env::consts::OS {
+        "windows" => std::env::var_os("APPDATA").map(PathBuf::from),
+        "macos" => home().map(|h| h.join("Library").join("Application Support")),
+        _ => std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config"))),
+    };
+    base.unwrap_or_else(std::env::temp_dir).join("MINT").join("settings.json")
 }
 
 fn read_settings() -> Value {
@@ -351,6 +409,33 @@ mod tests {
     }
 
     #[test]
+    fn picks_newest_nightly_only() {
+        let list = serde_json::json!([
+            { "tag_name": "v1.2.0", "prerelease": false, "draft": false },
+            { "tag_name": "nightly-20261103-0600-bbbbbbb", "prerelease": true, "draft": false },
+            { "tag_name": "nightly-20261102-0600-aaaaaaa", "prerelease": true, "draft": false },
+            { "tag_name": "v1.3.0-rc1", "prerelease": true, "draft": false }
+        ]);
+        assert_eq!(pick_nightly(&list).unwrap()["tag_name"], "nightly-20261103-0600-bbbbbbb");
+        assert!(pick_nightly(&serde_json::json!([{ "tag_name": "v1.0.0", "prerelease": false }])).is_none());
+    }
+
+    #[test]
+    fn picks_platform_asset() {
+        let assets: Vec<Value> = serde_json::from_str(
+            r#"[{"name":"MINT-linux-x64-abc.zip","size":5},{"name":"MINT-macos-arm64-abc.zip","size":6},
+                {"name":"MINT-windows-x64-abc.zip","size":7},{"name":"MINT-windows-x64-abc.zip.sha256","size":1}]"#,
+        )
+        .unwrap();
+        assert_eq!(pick_asset(&assets, "macos-arm64").unwrap()["size"], 6);
+        assert_eq!(pick_asset(&assets, "linux-x64").unwrap()["size"], 5);
+        assert!(pick_asset(&assets, "macos-x64").is_none() || std::env::consts::OS == "windows");
+        // legacy single untagged zip counts as the Windows build
+        let legacy: Vec<Value> = serde_json::from_str(r#"[{"name":"MINT.-.1.1.1.zip","size":9}]"#).unwrap();
+        assert_eq!(pick_asset(&legacy, "windows-x64").is_some(), std::env::consts::OS == "windows");
+    }
+
+    #[test]
     fn parses_iso_time() {
         assert_eq!(iso_to_unix("1970-01-02T00:00:00Z"), Some(86400));
         assert_eq!(iso_to_unix("2026-11-01T07:15:35Z"), Some(1793517335));
@@ -361,6 +446,9 @@ mod tests {
     #[ignore]
     fn live_check_and_install() {
         // Same commit as the newest release: nothing to do.
+        if platform_tag() != "windows-x64" {
+            return; // the existing release only has a Windows build
+        }
         assert!(check_with("56a329a", 1793517000, Channel::Stable).unwrap().is_none());
         // An older build: the newest release is offered.
         let rel = check_with("0000000", 1, Channel::Stable).unwrap().expect("an update");
@@ -368,12 +456,12 @@ mod tests {
         let dir = std::env::temp_dir().join("mint_update_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("mint-gui.exe");
+        let target = dir.join(gui_file());
         std::fs::write(&target, b"old build").unwrap();
         let last = std::cell::Cell::new(0u64);
         install(&rel, &target, &|d, _| last.set(d)).unwrap();
         let bytes = std::fs::read(&target).unwrap();
-        assert_eq!(&bytes[..2], b"MZ");
+        assert!(looks_like_program(&bytes));
         assert!(bytes.len() > 1_000_000);
         assert_eq!(std::fs::read(old_path(&target)).unwrap(), b"old build");
         println!("installed {} bytes", bytes.len());

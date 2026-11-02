@@ -450,7 +450,12 @@ impl eframe::App for App {
                     ui.spinner();
                 }
                 if !busy && self.log.lock().unwrap().last().is_some_and(|l| l == "Done.") && ui.button("Open output folder").clicked() {
-                    let _ = std::process::Command::new("explorer").arg(&self.opts.out_dir).spawn();
+                    let opener = match std::env::consts::OS {
+                        "windows" => "explorer",
+                        "macos" => "open",
+                        _ => "xdg-open",
+                    };
+                    let _ = std::process::Command::new(opener).arg(&self.opts.out_dir).spawn();
                 }
             });
             egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {

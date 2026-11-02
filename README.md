@@ -117,13 +117,28 @@ now**, which replaces `mint-gui.exe` (and `mint-cli.exe` next to it) and offers
 a restart. In About you can switch the **update channel** (Stable / Nightly) or
 turn the startup check off.
 
+## Platforms
+
+MINT builds for Windows (x64), Linux (x64) and macOS (Apple Silicon and Intel).
+Each release has one zip per platform (`MINT-windows-x64-...`, `MINT-linux-x64-...`,
+`MINT-macos-arm64-...`, `MINT-macos-x64-...`) holding `mint-gui` and `mint-cli`,
+and the in-app updater downloads the matching one.
+
+- **Linux:** needs a desktop with GTK 3 (file dialogs) and OpenGL. To build from
+  source: `libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev
+  libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev`.
+- **macOS:** the binaries are not code-signed, so Gatekeeper blocks the first run.
+  Allow it in System Settings -> Privacy & Security, or run
+  `xattr -d com.apple.quarantine mint-gui mint-cli`.
+- **Windows:** SmartScreen may warn about the unsigned exe (More info -> Run anyway).
+
 ## Builds and releases (GitHub Actions)
 
 | Channel | Trigger | Release | Who gets it |
 |---|---|---|---|
 | CI | every push / PR | none (build + tests only) | - |
-| Nightly | daily 06:00 UTC if `main` changed, or run manually | one rolling pre-release tagged `nightly` | users on the Nightly channel |
-| Stable | push a tag like `v1.2.0` | a normal release (`v1.2.0-rc1` = pre-release) | everyone on the Stable channel |
+| Nightly | daily 06:00 UTC if `main` changed, or run manually | a new pre-release per build (`nightly-<date>-<time>-<commit>`); the newest 10 are kept | users on the Nightly channel |
+| Stable | push a tag like `v1.2.0` | a normal release (`v1.2.0-rc1` = pre-release), kept forever | everyone on the Stable channel |
 
 Cut a stable release:
 
@@ -132,8 +147,8 @@ git tag v1.2.0
 git push origin v1.2.0
 ```
 
-The workflow stamps the version from the tag, builds, packs a small zip
-(`scripts/package-release.ps1`, run it locally too), and creates the release with
+The workflow stamps the version from the tag, builds every platform, packs a small zip per platform
+(`python scripts/package_release.py`, run it locally too), and creates the release with
 generated notes (or `RELEASE_NOTES.md` if present). The release title always ends
 with the short commit hash (`MINT - 1.2.0 - 2026-11-02 - 56a329a`); the updater
 compares that hash with the one built into the app, so keep that format if you

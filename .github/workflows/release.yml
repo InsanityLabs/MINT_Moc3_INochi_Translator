@@ -3,7 +3,7 @@ name: Release
 # Publishes a stable release when you push a version tag:
 #   git tag v1.2.0 && git push origin v1.2.0
 # Tags with a suffix (v1.2.0-rc1) become pre-releases and are skipped by the
-# stable update channel.
+# stable update channel. Releases are never deleted automatically.
 
 on:
   push:
@@ -13,42 +13,74 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-
+        with:
+          key: ${{ matrix.target }}
       - name: Stamp the version from the tag
         shell: bash
         run: |
           v="${GITHUB_REF_NAME#v}"
           for f in crates/*/Cargo.toml; do
-            sed -i "0,/^version = .*/s//version = \"$v\"/" "$f"
+            sed -i.bak "1,/^version = .*/s//version = \"$v\"/" "$f"
+            rm -f "$f.bak"
           done
-          echo "VERSION=$v" >> "$GITHUB_ENV"
-
+      - name: Build
+        run: cargo build --release --workspace --target ${{ matrix.target }}
       - name: Package
-        shell: pwsh
-        run: ./scripts/package-release.ps1
+        run: python scripts/package_release.py --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
 
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
       - name: Publish release
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          v="${GITHUB_REF_NAME#v}"
           short=$(git rev-parse --short=7 HEAD)
-          date=$(date -u +%Y-%m-%d)
-          flags=""
-          if [[ "$VERSION" == *-* ]]; then flags="--prerelease"; else flags="--latest"; fi
+          day=$(date -u +%Y-%m-%d)
+          if [[ "$v" == *-* ]]; then kind="--prerelease"; else kind="--latest"; fi
           notes=(--generate-notes)
           if [[ -f RELEASE_NOTES.md ]]; then notes=(--notes-file RELEASE_NOTES.md); fi
+          ls -l dist
           # The in-app updater compares the LAST token of the title with its own commit.
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/MINT-windows-x64-$short.zip" "dist/MINT-windows-x64-$short.zip.sha256" \
-            --title "MINT - $VERSION - $date - $short" \
-            --verify-tag $flags "${notes[@]}"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "MINT - $v - $day - $short" \
+            --verify-tag $kind "${notes[@]}"
