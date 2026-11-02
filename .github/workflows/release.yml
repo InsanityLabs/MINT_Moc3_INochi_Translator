@@ -1,0 +1,54 @@
+name: Release
+
+# Publishes a stable release when you push a version tag:
+#   git tag v1.2.0 && git push origin v1.2.0
+# Tags with a suffix (v1.2.0-rc1) become pre-releases and are skipped by the
+# stable update channel.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Stamp the version from the tag
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for f in crates/*/Cargo.toml; do
+            sed -i "0,/^version = .*/s//version = \"$v\"/" "$f"
+          done
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package-release.ps1
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short=$(git rev-parse --short=7 HEAD)
+          date=$(date -u +%Y-%m-%d)
+          flags=""
+          if [[ "$VERSION" == *-* ]]; then flags="--prerelease"; else flags="--latest"; fi
+          notes=(--generate-notes)
+          if [[ -f RELEASE_NOTES.md ]]; then notes=(--notes-file RELEASE_NOTES.md); fi
+          # The in-app updater compares the LAST token of the title with its own commit.
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/MINT-windows-x64-$short.zip" "dist/MINT-windows-x64-$short.zip.sha256" \
+            --title "MINT - $VERSION - $date - $short" \
+            --verify-tag $flags "${notes[@]}"

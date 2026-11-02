@@ -1,0 +1,73 @@
+name: Nightly
+
+# Rolling pre-release called "nightly", rebuilt from main when there are new
+# commits. It is a pre-release, so GitHub's "latest release" (what stable users
+# of the in-app updater follow) never points at it.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if main has not changed since the last nightly"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Anything new since the last nightly?
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short=$(git rev-parse --short=7 HEAD)
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          last=$(gh release view nightly --json name -q .name 2>/dev/null || true)
+          if [[ "$last" == *"$short" && "${{ inputs.force }}" != "true" ]]; then
+            echo "Nightly is already at $short, nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.gate.outputs.build == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.gate.outputs.build == 'true'
+
+      - name: Package
+        if: steps.gate.outputs.build == 'true'
+        shell: pwsh
+        run: ./scripts/package-release.ps1
+
+      - name: Publish rolling nightly release
+        if: steps.gate.outputs.build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHORT: ${{ steps.gate.outputs.short }}
+        run: |
+          date=$(date -u +%Y-%m-%d)
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            "dist/MINT-windows-x64-$SHORT.zip" "dist/MINT-windows-x64-$SHORT.zip.sha256" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "MINT Nightly - $date - $SHORT" \
+            --notes "Automatic build of commit $SHORT. May be unstable; use the Stable channel for tested releases."

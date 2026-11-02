@@ -110,6 +110,39 @@ Not yet verified against Cubism itself: output types other than "Angle" in the
 `.cmo3` physics settings, and the `.can3` motion files (laid out like a
 Cubism-authored `.can3`, one scene per motion).
 
+## Updating
+
+The GUI checks the project's GitHub releases at startup and offers **Update
+now**, which replaces `mint-gui.exe` (and `mint-cli.exe` next to it) and offers
+a restart. In About you can switch the **update channel** (Stable / Nightly) or
+turn the startup check off.
+
+## Builds and releases (GitHub Actions)
+
+| Channel | Trigger | Release | Who gets it |
+|---|---|---|---|
+| CI | every push / PR | none (build + tests only) | - |
+| Nightly | daily 06:00 UTC if `main` changed, or run manually | one rolling pre-release tagged `nightly` | users on the Nightly channel |
+| Stable | push a tag like `v1.2.0` | a normal release (`v1.2.0-rc1` = pre-release) | everyone on the Stable channel |
+
+Cut a stable release:
+
+```
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+The workflow stamps the version from the tag, builds, packs a small zip
+(`scripts/package-release.ps1`, run it locally too), and creates the release with
+generated notes (or `RELEASE_NOTES.md` if present). The release title always ends
+with the short commit hash (`MINT - 1.2.0 - 2026-11-02 - 56a329a`); the updater
+compares that hash with the one built into the app, so keep that format if you
+publish by hand. Pre-releases are invisible to the Stable channel.
+
+The workflows publish to the repository they live in, and the app reads
+`InsanityLabs/MINT_Moc3_INochi_Translator` (`REPO` in
+`crates/mint-gui/src/update.rs`); keep the two the same.
+
 ## Layout
 
 - `crates/mint-core` — moc3 parser, pose evaluation, rasterizer, emitters

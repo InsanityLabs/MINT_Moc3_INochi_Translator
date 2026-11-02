@@ -1,3 +1,5 @@
+mod update;
+
 use eframe::egui::{self, Color32, RichText};
 use image::RgbaImage;
 use mint_core::{Model, Moc3};
@@ -242,6 +244,10 @@ struct App {
     busy: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<String>>>,
     about: bool,
+    upd: Arc<Mutex<update::State>>,
+    auto_check: bool,
+    channel: update::Channel,
+    checked_at_start: bool,
 }
 
 const ABOUT_LIBS: &[(&str, &str)] = &[
@@ -270,6 +276,10 @@ impl Default for App {
             busy: Arc::new(AtomicBool::new(false)),
             log: Arc::new(Mutex::new(vec!["Open a .moc3 file (or drop one on the window).".into()])),
             about: false,
+            upd: Arc::new(Mutex::new(update::State::Idle)),
+            auto_check: update::auto_check_enabled(),
+            channel: update::channel(),
+            checked_at_start: false,
         }
     }
 }
@@ -287,6 +297,44 @@ impl App {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             *slot.lock().unwrap() = Some(analyze(&path));
+            ctx.request_repaint();
+        });
+    }
+
+    fn check_updates(&self, ctx: &egui::Context) {
+        {
+            let mut s = self.upd.lock().unwrap();
+            if matches!(*s, update::State::Checking | update::State::Downloading { .. }) {
+                return;
+            }
+            *s = update::State::Checking;
+        }
+        let (upd, ctx, channel) = (self.upd.clone(), ctx.clone(), self.channel);
+        std::thread::spawn(move || {
+            let next = match update::check(channel) {
+                Ok(Some(r)) => update::State::Available(r),
+                Ok(None) => update::State::UpToDate,
+                Err(e) => update::State::Failed(e),
+            };
+            *upd.lock().unwrap() = next;
+            ctx.request_repaint();
+        });
+    }
+
+    fn install_update(&self, ctx: &egui::Context, rel: update::Release) {
+        let (upd, ctx) = (self.upd.clone(), ctx.clone());
+        *upd.lock().unwrap() = update::State::Downloading { done: 0, total: 1 };
+        std::thread::spawn(move || {
+            let result = std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
+                update::install(&rel, &exe, &|done, total| {
+                    *upd.lock().unwrap() = update::State::Downloading { done, total };
+                    ctx.request_repaint();
+                })
+            });
+            *upd.lock().unwrap() = match result {
+                Ok(()) => update::State::Ready,
+                Err(e) => update::State::Failed(e),
+            };
             ctx.request_repaint();
         });
     }
@@ -328,6 +376,12 @@ impl eframe::App for App {
                 }
             }
         }
+        if !self.checked_at_start {
+            self.checked_at_start = true;
+            if self.auto_check {
+                self.check_updates(ctx);
+            }
+        }
         let busy = self.busy.load(Ordering::SeqCst);
         if busy || self.is_loading {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -343,6 +397,38 @@ impl eframe::App for App {
                 ui.separator();
                 if ui.button("About").clicked() {
                     self.about = true;
+                }
+                let state = self.upd.lock().unwrap().clone();
+                match state {
+                    update::State::Available(rel) => {
+                        ui.separator();
+                        ui.label(RichText::new(format!("Update available: {}", rel.name)).color(Color32::from_rgb(120, 200, 120)));
+                        if ui.button("Update now").clicked() {
+                            self.install_update(ctx, rel);
+                        }
+                    }
+                    update::State::Downloading { done, total } => {
+                        ui.separator();
+                        ui.add(egui::ProgressBar::new((done as f32 / total.max(1) as f32).min(1.0)).desired_width(160.0).text("Updating..."));
+                    }
+                    update::State::Ready => {
+                        ui.separator();
+                        ui.label(RichText::new("Updated. Restart to finish.").color(Color32::from_rgb(120, 200, 120)));
+                        if ui.button("Restart now").clicked() {
+                            if let Ok(exe) = std::env::current_exe() {
+                                let _ = std::process::Command::new(exe).spawn();
+                            }
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }
+                    update::State::Failed(e) => {
+                        ui.separator();
+                        ui.label(RichText::new("Update failed").color(Color32::LIGHT_RED)).on_hover_text(e);
+                        if ui.small_button("Retry").clicked() {
+                            self.check_updates(ctx);
+                        }
+                    }
+                    _ => {}
                 }
                 match &self.path {
                     Some(p) => ui.label(p.display().to_string()),
@@ -428,6 +514,34 @@ impl eframe::App for App {
             let mut open = true;
             egui::Window::new("About MINT").open(&mut open).resizable(false).show(ctx, |ui| {
                 ui.label(RichText::new("MINT — Moc3 INochi Translator").strong());
+                ui.label(format!("Version {} ({})", env!("CARGO_PKG_VERSION"), update::COMMIT));
+                ui.horizontal(|ui| {
+                    if ui.button("Check for updates").clicked() {
+                        self.check_updates(ctx);
+                    }
+                    let text = match &*self.upd.lock().unwrap() {
+                        update::State::Checking => "Checking...".to_string(),
+                        update::State::UpToDate => "You are up to date.".to_string(),
+                        update::State::Available(r) => format!("New: {}", r.name),
+                        update::State::Failed(e) => e.chars().take(60).collect(),
+                        _ => String::new(),
+                    };
+                    ui.label(text);
+                });
+                if ui.checkbox(&mut self.auto_check, "Check for updates on startup").changed() {
+                    update::set_auto_check(self.auto_check);
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Update channel:");
+                    for (ch, label) in [(update::Channel::Stable, "Stable"), (update::Channel::Nightly, "Nightly")] {
+                        if ui.selectable_label(self.channel == ch, label).clicked() && self.channel != ch {
+                            self.channel = ch;
+                            update::set_channel(ch);
+                            self.check_updates(ctx);
+                        }
+                    }
+                });
+                ui.add_space(4.0);
                 ui.label("Recovers editable projects (PSD, ORA, cmo3, Inochi2D) from compiled moc3 models.");
                 ui.label("Clean-room implementation — no Live2D code is used.");
                 ui.add_space(4.0);
@@ -471,6 +585,7 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
+    update::cleanup_old();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
