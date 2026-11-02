@@ -9,6 +9,8 @@ as far as the source format allows.
 
 MINT is a clean-room implementation. **It does not use any code from Live2D.**
 
+[![Release](https://github.com/InsanityLabs/MINT_Moc3_INochi_Translator/actions/workflows/release.yml/badge.svg)](https://github.com/InsanityLabs/MINT_Moc3_INochi_Translator/actions/workflows/release.yml) [![Nightly](https://github.com/InsanityLabs/MINT_Moc3_INochi_Translator/actions/workflows/nightly.yml/badge.svg)](https://github.com/InsanityLabs/MINT_Moc3_INochi_Translator/actions/workflows/nightly.yml) [![CI](https://github.com/InsanityLabs/MINT_Moc3_INochi_Translator/actions/workflows/ci.yml/badge.svg)](https://github.com/InsanityLabs/MINT_Moc3_INochi_Translator/actions/workflows/ci.yml)
+
 ## Please read before using
 
 This tool is intended for recovering your own work — models you own or have
