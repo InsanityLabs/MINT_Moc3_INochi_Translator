@@ -82,6 +82,7 @@ pub(super) fn parse_art_meshes(
             )?;
             let mut mask_drawable_indices = masks[mask_range]
                 .iter()
+                .filter(|value| **value >= 0)
                 .map(|value| {
                     let value =
                         usize::try_from(*value).map_err(|_| invalid("negative mask index"))?;
