@@ -77,6 +77,11 @@ fn alpha_bbox(img: &RgbaImage) -> Option<(u32, u32, u32, u32)> {
 /// Returns (root group, canvas width, canvas height); children are
 /// in bottom-to-top order.
 pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool) -> (LayerGroup, u32, u32) {
+    build_layers_with(model, textures, export_all, &crate::Overrides::default())
+}
+
+/// Like [`build_layers`], using the user's renamed layers and groups.
+pub fn build_layers_with(model: &mut Model, textures: &[RgbaImage], export_all: bool, ov: &crate::Overrides) -> (LayerGroup, u32, u32) {
     let moc = model.moc;
     let size = (
         moc.canvas.width.max(1.0) as u32,
@@ -130,7 +135,7 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
             })
         });
         layer_of[em.index] = Some(LayerImage {
-            name: if am.id.is_empty() { format!("ArtMesh{}", em.index) } else { am.id.clone() },
+            name: if am.id.is_empty() { format!("ArtMesh{}", em.index) } else { ov.mesh_name(&am.id).to_string() },
             mesh_idx: em.index,
             image: cropped,
             left: x0 as i32,
@@ -190,7 +195,8 @@ pub fn build_layers(model: &mut Model, textures: &[RgbaImage], export_all: bool)
         }
         for &p in &chain[common..] {
             seen[p] += 1;
-            let name = if seen[p] == 1 { moc.parts[p].id.clone() } else { format!("{} ({})", moc.parts[p].id, seen[p]) };
+            let base = ov.part_name(&moc.parts[p].id);
+            let name = if seen[p] == 1 { base.to_string() } else { format!("{} ({})", base, seen[p]) };
             stack.push(Open { part: p, group: LayerGroup { name, visible: !hidden[p], children: Vec::new() } });
         }
         let node = LayerNode::Image(layer_of[mi].take().unwrap());
@@ -238,6 +244,7 @@ fn configured_decompiler(
     model: &mut crate::model::Model,
     textures: &[image::RgbaImage],
     force_visible: bool,
+    ov: &crate::Overrides,
 ) -> moc2cmo::Decompiler {
     let mut dec = moc2cmo::Decompiler::new();
     dec.set_force_visible(force_visible);
@@ -264,6 +271,17 @@ fn configured_decompiler(
         names = moc2cmo::DisplayNames::from_display_info(&info);
     }
     names.hidden_parts = hidden_parts(moc, Some(moc_path));
+    for (k, v) in &ov.part_names {
+        names.part_names.insert(k.clone(), v.clone());
+    }
+    for (k, v) in &ov.param_names {
+        names.parameter_names.insert(k.clone(), v.clone());
+    }
+    names.mesh_names = ov.mesh_names.clone();
+    names.pairs = ov.pairs.clone();
+    if ov.apply_visibility {
+        names.hidden_parts.extend(ov.hidden_parts.iter().cloned());
+    }
     dec.set_display_names(names);
     dec
 }
@@ -350,8 +368,9 @@ pub fn export_cmo3(
     model: &mut crate::model::Model,
     textures: &[image::RgbaImage],
     force_visible: bool,
+    ov: &crate::Overrides,
 ) -> Result<Cmo3Export, String> {
-    let dec = configured_decompiler(moc, moc_path, model, textures, force_visible);
+    let dec = configured_decompiler(moc, moc_path, model, textures, force_visible, ov);
     let model3 = moc_path.with_extension("model3.json");
     if model3.exists() {
         let projects =

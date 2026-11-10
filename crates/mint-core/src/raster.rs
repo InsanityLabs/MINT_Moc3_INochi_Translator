@@ -241,13 +241,21 @@ pub fn blend_px(dst: &mut Rgba<u8>, src: [u8; 4], blend: Blend, alpha_mode: Alph
 
 /// Rasterize `mesh` into `dst` sampling `tex`.
 pub fn draw_mesh(dst: &mut RgbaImage, tex: &RgbaImage, mesh: &MeshGeom) {
+    draw_mesh_at(dst, tex, mesh, 0.0, None)
+}
+
+/// Like [`draw_mesh`], with the mesh shifted up by `dy` pixels (to render a
+/// horizontal band of a larger image) and an optional mask that replaces the
+/// mesh's own.
+pub fn draw_mesh_at(dst: &mut RgbaImage, tex: &RgbaImage, mesh: &MeshGeom, dy: f32, mask_override: Option<&RgbaImage>) {
+    let mask_ref = mask_override.or(mesh.mask.as_ref());
     let (w, h) = (dst.width() as i32, dst.height() as i32);
     for tri in mesh.indices.chunks_exact(3) {
-        let (a, b, c) = (
-            mesh.verts_px[tri[0] as usize],
-            mesh.verts_px[tri[1] as usize],
-            mesh.verts_px[tri[2] as usize],
-        );
+        let at = |i: u32| {
+            let v = mesh.verts_px[i as usize];
+            Vec2 { x: v.x, y: v.y - dy }
+        };
+        let (a, b, c) = (at(tri[0]), at(tri[1]), at(tri[2]));
         let (ua, ub, uc) = (
             mesh.uvs[tri[0] as usize],
             mesh.uvs[tri[1] as usize],
@@ -285,7 +293,7 @@ pub fn draw_mesh(dst: &mut RgbaImage, tex: &RgbaImage, mesh: &MeshGeom) {
                     }
                 }
                 let mut alpha = px[3] as f32 / 255.0 * mesh.opacity;
-                if let Some(mask) = &mesh.mask {
+                if let Some(mask) = mask_ref {
                     let m = mask.get_pixel(x as u32, y as u32).0[3] as f32 / 255.0;
                     alpha *= if mesh.inverted_mask { 1.0 - m } else { m };
                 }

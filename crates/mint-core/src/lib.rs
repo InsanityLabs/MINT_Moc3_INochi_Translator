@@ -9,6 +9,7 @@ pub mod model;
 pub mod raster;
 pub mod render;
 pub mod inp;
+pub mod overrides;
 
 pub use moc3::{Moc3, Canvas};
 
@@ -24,3 +25,4 @@ pub fn guess_pairs() -> bool {
     GUESS_PAIRS.load(std::sync::atomic::Ordering::Relaxed)
 }
 pub use model::{Model, Vec2};
+pub use overrides::Overrides;

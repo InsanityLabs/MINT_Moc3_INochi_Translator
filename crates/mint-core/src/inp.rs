@@ -83,6 +83,9 @@ pub fn sidecars(moc_path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
             out.push((format!("MINT.{name}"), b));
         }
     }
+    if let Ok(b) = std::fs::read(crate::Overrides::path_for(moc_path)) {
+        out.push(("MINT.overrides".to_string(), b));
+    }
     let mut exps = serde_json::Map::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -106,6 +109,7 @@ struct Extras {
     physics: Option<Value>,
     part_names: std::collections::HashMap<String, String>,
     param_names: std::collections::HashMap<String, String>,
+    overrides: crate::Overrides,
 }
 
 fn parse_extras(ext: &[(String, Vec<u8>)]) -> Extras {
@@ -122,6 +126,15 @@ fn parse_extras(ext: &[(String, Vec<u8>)]) -> Extras {
                 }
             }
         }
+    }
+    if let Some(ov) = ext.iter().find(|(n, _)| n == "MINT.overrides").and_then(|(_, b)| crate::Overrides::from_bytes(b)) {
+        for (k, v) in &ov.part_names {
+            x.part_names.insert(k.clone(), v.clone());
+        }
+        for (k, v) in &ov.param_names {
+            x.param_names.insert(k.clone(), v.clone());
+        }
+        x.overrides = ov;
     }
     x
 }
@@ -243,6 +256,7 @@ struct Ctx<'a> {
     tints: Vec<([f32; 3], [f32; 3])>,
     crops: &'a [Option<MeshCrop>],
     hidden: std::collections::HashSet<String>,
+    ov: &'a crate::Overrides,
     part_names: &'a std::collections::HashMap<String, String>,
     cw: f32,
     ch: f32,
@@ -343,8 +357,8 @@ impl<'a> Ctx<'a> {
         json!({
             "type": "Part",
             "uuid": self.mesh_uuid(mi),
-            "name": if am.id.is_empty() { format!("ArtMesh{}", mi) } else { am.id.clone() },
-            "enabled": true,
+            "name": if am.id.is_empty() { format!("ArtMesh{}", mi) } else { self.ov.mesh_name(&am.id).to_string() },
+            "enabled": !(self.ov.apply_visibility && self.ov.hidden_meshes.contains(am.id.as_str())),
             "zsort": -(self.rp[mi] as f32),
             "transform": transform(),
             "lockToRoot": false,
@@ -379,7 +393,10 @@ fn build_puppet(moc: &Moc3, model: &mut Model, crops: &[Option<MeshCrop>], extra
     }
 
     // ---- parameters: single sliders, plus X/Y pairs merged into 2D params ----
-    let pairs = find_pairs(moc);
+    let pairs = match extras.overrides.pair_indices(moc) {
+        Some(p) => p,
+        None => find_pairs(moc),
+    };
     let mut axis_target: std::collections::HashMap<usize, (u64, u8)> = std::collections::HashMap::new();
     for &(px, py) in &pairs {
         axis_target.insert(px, (5000 + px as u64, 0));
@@ -536,7 +553,7 @@ fn build_puppet(moc: &Moc3, model: &mut Model, crops: &[Option<MeshCrop>], extra
     }
     let node_op: Vec<f32> = (0..n_mesh).map(|i| if opacity_driven[i] { 1.0 } else { base[i].1.clamp(0.0, 1.0) }).collect();
     let tints: Vec<([f32; 3], [f32; 3])> = (0..n_mesh).map(|i| (if tint_driven[i] { [1.0; 3] } else { base_cols[i].0 }, if screen_driven[i] { [0.0; 3] } else { base_cols[i].1 })).collect();
-    let ctx = Ctx { moc, tints, pc, pm, rp, base: base.into_iter().map(|b| b.0).collect(), node_op, crops, hidden: crate::emit::hidden_parts(moc, None), part_names: &extras.part_names, cw, ch };
+    let ctx = Ctx { moc, tints, pc, pm, rp, base: base.into_iter().map(|b| b.0).collect(), node_op, crops, hidden: { let mut h = crate::emit::hidden_parts(moc, None); if extras.overrides.apply_visibility { h.extend(extras.overrides.hidden_parts.iter().cloned()); } h }, ov: &extras.overrides, part_names: &extras.part_names, cw, ch };
     let mut root_children = ctx.children(&root_parts, &root_meshes);
     root_children.extend(phys_nodes);
     let root = json!({
@@ -707,7 +724,9 @@ fn make_axis(moc: &Moc3, pi: usize) -> Axis {
 /// eyeballs, mouth form + open). The moc3 does not record which pairs the
 /// author combined, so only these standard, adjacent pairs are merged into 2D
 /// Inochi parameters; nothing else is guessed.
-fn find_pairs(moc: &Moc3) -> Vec<(usize, usize)> {
+/// Parameter pairs combined by default (Cubism's standard template, plus the
+/// name-based guess when enabled).
+pub fn find_pairs(moc: &Moc3) -> Vec<(usize, usize)> {
     const STANDARD: [(&str, &str); 3] = [
         ("ParamAngleX", "ParamAngleY"),
         ("ParamEyeBallX", "ParamEyeBallY"),

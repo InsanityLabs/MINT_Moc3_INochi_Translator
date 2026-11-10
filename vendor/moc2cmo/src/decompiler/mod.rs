@@ -36,6 +36,10 @@ pub struct DisplayNames {
     pub hidden_parts: std::collections::HashSet<String>,
     /// Physics document written into the editor's physics settings.
     pub physics: Option<Physics3>,
+    /// Art mesh id -> editor name.
+    pub mesh_names: HashMap<String, String>,
+    /// Exactly these `(x id, y id)` parameter pairs are combined; `None` = automatic.
+    pub pairs: Option<Vec<(String, String)>>,
 }
 
 impl DisplayNames {
@@ -43,6 +47,8 @@ impl DisplayNames {
     pub fn from_display_info(info: &DisplayInfo3) -> Self {
         Self {
             physics: None,
+            mesh_names: HashMap::new(),
+            pairs: None,
             parameter_names: info
                 .parameters()
                 .iter()
@@ -353,9 +359,15 @@ fn build_model3_projects(model3_path: &Path, mut decompiler: Decompiler) -> Resu
             let info = DisplayInfo3::from_json_bytes(&bytes)?;
             let hidden = std::mem::take(&mut decompiler.display_names.hidden_parts);
             let physics = decompiler.display_names.physics.take();
+            let user = std::mem::take(&mut decompiler.display_names);
             let mut names = DisplayNames::from_display_info(&info);
             names.hidden_parts = hidden;
             names.physics = physics;
+            // names / pairs the caller set explicitly win over the cdi3 ones
+            names.part_names.extend(user.part_names);
+            names.parameter_names.extend(user.parameter_names);
+            names.mesh_names = user.mesh_names;
+            names.pairs = user.pairs;
             decompiler.set_display_names(names);
         } else {
             let _ = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {

@@ -313,12 +313,18 @@ fn main() -> std::io::Result<()> {
             });
             let export_all = args.get(4).map(|s| s == "--all").unwrap_or(false);
             let textures = load_textures(&path);
+            let ov = mint_core::Overrides::load(&path).unwrap_or_default();
+            if !ov.is_empty() {
+                println!("using edits from {}", mint_core::Overrides::path_for(&path).display());
+            }
             let mut model = Model::new(&moc);
             model.hide_default_hidden(&path);
+            ov.apply_to_model(&mut model);
             let merged = mint_core::render::render(&mut model, &textures);
             let mut model2 = Model::new(&moc);
             model2.hide_default_hidden(&path);
-            let (root, w, h) = mint_core::emit::build_layers(&mut model2, &textures, export_all);
+            ov.apply_to_model(&mut model2);
+            let (root, w, h) = mint_core::emit::build_layers_with(&mut model2, &textures, export_all, &ov);
 
             let ora_path = stem.with_extension("ora");
             let f = std::io::BufWriter::new(std::fs::File::create(&ora_path)?);
@@ -333,7 +339,7 @@ fn main() -> std::io::Result<()> {
             // cmo3 export via moc2cmo — uses the model3.json manifest when
             // present (restores names, embeds aux JSON, builds a can3)
             let cmo3_path = stem.with_extension("cmo3");
-            match mint_core::emit::export_cmo3(&moc, &path, &mut model, &textures, args.iter().any(|a| a == "--cmo3-visible")) {
+            match mint_core::emit::export_cmo3(&moc, &path, &mut model, &textures, args.iter().any(|a| a == "--cmo3-visible"), &ov) {
                 Ok(out) => {
                     fs::write(&cmo3_path, out.cmo3)?;
                     println!("wrote {}", cmo3_path.display());

@@ -147,7 +147,8 @@ fn write_mesh_source(
 
     start_shared(xml, "CArtMeshSource", plan.source);
     xml.start("ACDrawableSource", &[attr("xs.n", "super")]);
-    start_parameter_controllable(xml, mesh.id(), Some(parent_part), plan.grid.grid);
+    let mesh_name = project.names.mesh_names.get(mesh.id()).map_or(mesh.id(), String::as_str);
+    start_parameter_controllable(xml, mesh_name, Some(parent_part), plan.grid.grid);
     xml.start(
         "carray_list",
         &[attr("xs.n", "_extensions"), attr("count", 3)],

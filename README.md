@@ -112,6 +112,32 @@ Not yet verified against Cubism itself: output types other than "Angle" in the
 `.cmo3` physics settings, and the `.can3` motion files (laid out like a
 Cubism-authored `.can3`, one scene per motion).
 
+## Editor
+
+After loading a model, the **Editor** tab shows a live viewport. It is for
+checking and fixing what is already in the model; you cannot add anything.
+
+- **Viewport:** scroll to zoom, drag to pan, click a layer to select it. Overlays
+  for the mesh wireframe and mesh points (selected layer or all; hover a point
+  for its index and position). The picture is always the exact render (masks,
+  every blend mode, offscreen parts), drawn for just the visible window at your
+  screen's pixel density on all CPU cores, so it stays sharp when zoomed in and
+  updates continuously while you move sliders (about 20-50 ms on big models).
+  The *Exact render* checkbox in View switches to a plain mesh preview instead.
+- **Parameters:** a slider per parameter, an X/Y pad for combined pairs
+  (double-click to reset). "Combine with next" / "Combined" decide which
+  parameters are combined, and that choice is used by the Cubism and Inochi exports.
+- **Layers:** the part and layer tree with show/hide toggles, filter and
+  selection. Tick *Edit names* to rename parts, layers and parameters, which
+  fixes models whose layer names were lost (only part names survive in many moc3 files).
+- **Saving:** *Save edits* writes `<model>.mint.json` next to the moc3. Exports
+  (GUI and `mint-cli export`) use it automatically: names in PSD/ORA layers and
+  groups, Inochi nodes and parameters, and the Cubism project; combined pairs;
+  and, if you tick the box in View, hidden parts/layers as the default visibility.
+  Unsaved edits in the open editor are also used by the GUI export.
+
+  the editor is not yet finished, and is not designed to be advanced. it is designed for quick fixes and adjustments to parameters and names that is it. 
+
 ## Updating
 
 The GUI checks the project's GitHub releases at startup and offers **Update

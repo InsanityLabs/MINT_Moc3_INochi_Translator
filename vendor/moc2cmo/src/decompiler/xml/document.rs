@@ -464,7 +464,10 @@ fn write_parameters(xml: &mut XmlWriter, plan: &ProjectPlan, model: &Moc3Model) 
         ) || (guess && matches!((a.strip_suffix('X'), b.strip_suffix('Y')), (Some(x), Some(y)) if x == y))
     };
     for (index, (parameter, parameter_plan)) in model.parameters().iter().zip(&plan.parameters).enumerate() {
-        let combined = ids.get(index + 1).is_some_and(|next| is_pair(ids[index], next));
+        let combined = match &plan.names.pairs {
+            Some(list) => ids.get(index + 1).is_some_and(|next| list.iter().any(|(x, y)| x == ids[index] && y == next)),
+            None => ids.get(index + 1).is_some_and(|next| is_pair(ids[index], next)),
+        };
         xml.start("CParameterSource", &[]);
         xml.text("i", &[attr("xs.n", "decimalPlaces")], "3");
         reference(xml, "CParameterGuid", "guid", parameter_plan.guid);

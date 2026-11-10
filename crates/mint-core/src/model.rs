@@ -96,6 +96,10 @@ pub struct Model<'a> {
     pub moc: &'a Moc3,
     /// Current parameter values (index-aligned with `moc.parameters`).
     pub params: Vec<f32>,
+    /// Canvas-to-pixel scale used by renders (1.0 = native canvas size).
+    pub px_scale: f32,
+    /// Pixel offset subtracted after scaling (a render window into the canvas).
+    pub px_offset: (f32, f32),
     /// parameterBinding index -> parameter index
     pb_to_param: Vec<i32>,
     // memoized evaluation state
@@ -105,6 +109,7 @@ pub struct Model<'a> {
     rot_world: Vec<Option<RotWorld>>,
     warp_world: Vec<Option<Vec<Vec2>>>,
     hidden_parts: Vec<bool>,
+    hidden_meshes: Vec<bool>,
 }
 
 /// Full child-space -> canvas transform of a rotation deformer.
@@ -142,6 +147,8 @@ impl<'a> Model<'a> {
         Model {
             moc,
             params,
+            px_scale: 1.0,
+            px_offset: (0.0, 0.0),
             pb_to_param,
             kf_weights: vec![Vec::new(); nkfb],
             warp_local: vec![None; moc.warp_deformers.len()],
@@ -149,6 +156,7 @@ impl<'a> Model<'a> {
             rot_world: vec![None; moc.deformers.len()],
             warp_world: vec![None; moc.deformers.len()],
             hidden_parts: vec![false; moc.parts.len()],
+            hidden_meshes: vec![false; moc.art_meshes.len()],
         }
     }
 
@@ -183,6 +191,37 @@ impl<'a> Model<'a> {
             guard += 1;
         }
         None
+    }
+
+    /// Additionally hide parts / layers by id (keeps what is already hidden).
+    pub fn hide_more(&mut self, parts: &std::collections::HashSet<String>, meshes: &std::collections::HashSet<String>) {
+        for (i, p) in self.moc.parts.iter().enumerate() {
+            if parts.contains(&p.id) {
+                self.hidden_parts[i] = true;
+            }
+        }
+        for (i, m) in self.moc.art_meshes.iter().enumerate() {
+            if meshes.contains(&m.id) {
+                self.hidden_meshes[i] = true;
+            }
+        }
+    }
+
+    /// Hide exactly these layers (by index); parts are untouched.
+    pub fn set_hidden_meshes(&mut self, hidden: &[bool]) {
+        for (i, h) in hidden.iter().enumerate() {
+            if let Some(slot) = self.hidden_meshes.get_mut(i) {
+                *slot = *h;
+            }
+        }
+    }
+
+    pub fn set_hidden_parts(&mut self, hidden: &[bool]) {
+        for (i, h) in hidden.iter().enumerate() {
+            if let Some(slot) = self.hidden_parts.get_mut(i) {
+                *slot = *h;
+            }
+        }
     }
 
     pub fn part_hidden(&self, part: usize) -> bool {
@@ -526,6 +565,9 @@ impl<'a> Model<'a> {
             1.0
         };
         let mut parent_chain_opacity = parent_chain_opacity;
+        if self.hidden_meshes.get(mi).copied().unwrap_or(false) {
+            parent_chain_opacity = 0.0;
+        }
         let (mut part, mut guard) = (am.parent_part, 0);
         while part >= 0 && (part as usize) < self.moc.parts.len() && guard < 64 {
             parent_chain_opacity *= self.moc.part_offscreen_opacity.get(part as usize).copied().unwrap_or(1.0);
@@ -551,7 +593,15 @@ impl<'a> Model<'a> {
         } else {
             v.y * c.pixels_per_unit + c.origin_y
         };
-        Vec2::new(x, y)
+        Vec2::new(x * self.px_scale - self.px_offset.0, y * self.px_scale - self.px_offset.1)
+    }
+
+    /// Size in pixels of a full-canvas render at the current `px_scale`.
+    pub fn render_size(&self) -> (u32, u32) {
+        (
+            (self.moc.canvas.width * self.px_scale).max(1.0) as u32,
+            (self.moc.canvas.height * self.px_scale).max(1.0) as u32,
+        )
     }
 
     /// Interpolated draw order of part `pi`.

@@ -1,3 +1,4 @@
+mod editor;
 mod update;
 
 use eframe::egui::{self, Color32, RichText};
@@ -25,6 +26,8 @@ struct Loaded {
     info: Vec<(String, String)>,
     issues: Vec<Issue>,
     preview: RgbaImage,
+    /// Parsed model + atlas pages for the editor tab (taken when it is first opened).
+    editor_data: Option<(Moc3, Vec<RgbaImage>)>,
 }
 
 #[derive(Clone)]
@@ -37,6 +40,7 @@ struct Opts {
     cmo3_visible: bool,
     guess_pairs: bool,
     out_dir: PathBuf,
+    overrides: mint_core::Overrides,
 }
 
 type Slot<T> = Arc<Mutex<Option<T>>>;
@@ -172,7 +176,20 @@ fn analyze(path: &Path) -> Result<Loaded, String> {
         ("Parameters".into(), moc.parameters.len().to_string()),
         ("Textures".into(), textures.len().to_string()),
     ];
-    Ok(Loaded { path: path.to_path_buf(), info, issues, preview })
+    drop(model);
+    let atlases: Vec<RgbaImage> = textures
+        .into_iter()
+        .map(|t| {
+            let m = t.width().max(t.height());
+            if m > 4096 {
+                let s = 4096.0 / m as f32;
+                image::imageops::resize(&t, (t.width() as f32 * s) as u32, (t.height() as f32 * s) as u32, image::imageops::FilterType::Triangle)
+            } else {
+                t
+            }
+        })
+        .collect();
+    Ok(Loaded { path: path.to_path_buf(), info, issues, preview, editor_data: Some((moc, atlases)) })
 }
 
 fn export(path: &Path, o: &Opts, log: &Arc<Mutex<Vec<String>>>) -> Result<(), String> {
@@ -190,10 +207,12 @@ fn export(path: &Path, o: &Opts, log: &Arc<Mutex<Vec<String>>>) -> Result<(), St
         say("Building layers...".into());
         let mut m = Model::new(&moc);
         m.hide_default_hidden(path);
+        o.overrides.apply_to_model(&mut m);
         let merged = mint_core::render::render(&mut m, &textures);
         let mut m2 = Model::new(&moc);
         m2.hide_default_hidden(path);
-        let (root, w, h) = mint_core::emit::build_layers(&mut m2, &textures, o.all_layers);
+        o.overrides.apply_to_model(&mut m2);
+        let (root, w, h) = mint_core::emit::build_layers_with(&mut m2, &textures, o.all_layers, &o.overrides);
         if o.ora {
             let p = stem.with_extension("ora");
             let f = std::io::BufWriter::new(fs::File::create(&p).map_err(e)?);
@@ -210,7 +229,7 @@ fn export(path: &Path, o: &Opts, log: &Arc<Mutex<Vec<String>>>) -> Result<(), St
     if o.cmo3 {
         say("Building Cubism project...".into());
         let mut m = Model::new(&moc);
-        let out = mint_core::emit::export_cmo3(&moc, path, &mut m, &textures, o.cmo3_visible)?;
+        let out = mint_core::emit::export_cmo3(&moc, path, &mut m, &textures, o.cmo3_visible, &o.overrides)?;
         let p = stem.with_extension("cmo3");
         fs::write(&p, out.cmo3).map_err(e)?;
         say(format!("wrote {}", p.display()));
@@ -222,11 +241,16 @@ fn export(path: &Path, o: &Opts, log: &Arc<Mutex<Vec<String>>>) -> Result<(), St
     }
     if o.inochi {
         say("Building Inochi2D puppet...".into());
+        let mut sidecar = mint_core::inp::sidecars(path);
+        sidecar.retain(|(n, _)| n != "MINT.overrides");
+        if !o.overrides.is_empty() {
+            sidecar.push(("MINT.overrides".to_string(), serde_json::to_vec(&o.overrides.to_json()).unwrap_or_default()));
+        }
         for ext in ["inp", "inx"] {
             let p = stem.with_extension(ext);
             let f = std::io::BufWriter::new(fs::File::create(&p).map_err(e)?);
             let mut m = Model::new(&moc);
-            mint_core::inp::write_inp_ext(&moc, &mut m, &textures, &mint_core::inp::sidecars(path), f).map_err(e)?;
+            mint_core::inp::write_inp_ext(&moc, &mut m, &textures, &sidecar, f).map_err(e)?;
             say(format!("wrote {}", p.display()));
         }
     }
@@ -248,6 +272,14 @@ struct App {
     auto_check: bool,
     channel: update::Channel,
     checked_at_start: bool,
+    view: View,
+    editor: Option<editor::Editor>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Preview,
+    Editor,
 }
 
 const ABOUT_LIBS: &[(&str, &str)] = &[
@@ -270,7 +302,7 @@ impl Default for App {
             loaded: None,
             texture: None,
             zoom: None,
-            opts: Opts { psd: true, ora: true, cmo3: true, inochi: true, all_layers: true, cmo3_visible: false, guess_pairs: false, out_dir: PathBuf::new() },
+            opts: Opts { psd: true, ora: true, cmo3: true, inochi: true, all_layers: true, cmo3_visible: false, guess_pairs: false, out_dir: PathBuf::new(), overrides: mint_core::Overrides::default() },
             loading: Arc::new(Mutex::new(None)),
             is_loading: false,
             busy: Arc::new(AtomicBool::new(false)),
@@ -280,6 +312,8 @@ impl Default for App {
             auto_check: update::auto_check_enabled(),
             channel: update::channel(),
             checked_at_start: false,
+            view: View::Preview,
+            editor: None,
         }
     }
 }
@@ -290,6 +324,8 @@ impl App {
         self.path = Some(path.clone());
         self.loaded = None;
         self.texture = None;
+        self.editor = None;
+        self.view = View::Preview;
         self.is_loading = true;
         self.log.lock().unwrap().clear();
         self.log.lock().unwrap().push(format!("Loading {}...", path.display()));
@@ -343,7 +379,12 @@ impl App {
         let Some(path) = self.path.clone() else { return };
         self.busy.store(true, Ordering::SeqCst);
         self.log.lock().unwrap().clear();
-        let (opts, log, busy, ctx) = (self.opts.clone(), self.log.clone(), self.busy.clone(), ctx.clone());
+        let mut opts = self.opts.clone();
+        opts.overrides = match &self.editor {
+            Some(ed) => ed.overrides(),
+            None => mint_core::Overrides::load(&path).unwrap_or_default(),
+        };
+        let (log, busy, ctx) = (self.log.clone(), self.busy.clone(), ctx.clone());
         std::thread::spawn(move || {
             match export(&path, &opts, &log) {
                 Ok(()) => log.lock().unwrap().push("Done.".into()),
@@ -562,7 +603,31 @@ impl eframe::App for App {
             }
         }
 
+        if self.view == View::Editor && self.editor.is_none() {
+            if let (Some(l), Some(path)) = (&mut self.loaded, &self.path) {
+                if let Some((moc, atlases)) = l.editor_data.take() {
+                    self.editor = Some(editor::Editor::new(ctx, path.clone(), moc, atlases));
+                }
+            }
+        }
+        if self.view == View::Editor {
+            if let Some(ed) = &mut self.editor {
+                egui::SidePanel::right("editor_side").resizable(true).default_width(330.0).show(ctx, |ui| ed.side_panel(ui));
+            }
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.loaded.is_some() {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.view, View::Preview, "Preview");
+                    ui.selectable_value(&mut self.view, View::Editor, "Editor");
+                });
+            }
+            if self.view == View::Editor {
+                if let Some(ed) = &mut self.editor {
+                    ed.viewport(ui);
+                    return;
+                }
+            }
             let Some(tex) = &self.texture else {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new(if self.is_loading { "Loading..." } else { "Drop a .moc3 here" }).weak().size(20.0));
