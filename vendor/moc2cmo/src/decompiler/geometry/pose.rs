@@ -426,10 +426,13 @@ fn corners_for_band(
 fn bracket(keys: &[f32], value: f32) -> Option<(usize, f32)> {
     match keys {
         [] => Some((0, 0.0)),
-        [key] => (value > key - EPS_KEY && value < key + EPS_KEY).then_some((0, 0.0)),
+        [key] => (value > key - EPS_KEY && value < key + EPS_KEY).then_some((0, 0.0)).or(Some((0, 0.0))),
         _ => {
-            if value < keys[0] - EPS_KEY || value >= keys[keys.len() - 1] + EPS_KEY {
-                return None;
+            if value < keys[0] - EPS_KEY {
+                return Some((0, 0.0));
+            }
+            if value >= keys[keys.len() - 1] + EPS_KEY {
+                return Some((keys.len() - 1, 0.0));
             }
             if value < keys[0] + EPS_KEY {
                 return Some((0, 0.0));
